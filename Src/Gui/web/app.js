@@ -16,6 +16,7 @@ const ICONS = {
   folder: '<path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/>',
   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.4 2.5 3.7 5.5 3.7 9s-1.3 6.5-3.7 9c-2.4-2.5-3.7-5.5-3.7-9S9.6 5.5 12 3z"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5.5m0-9v.01"/>',
+  play: '<path d="M8 5.8v12.4L18 12z"/>',
   retry: '<path d="M4.5 12a7.5 7.5 0 0 1 12.8-5.3L19.5 9m0-4.5V9H15m4.5 3a7.5 7.5 0 0 1-12.8 5.3L4.5 15m0 4.5V15H9"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
   upload: '<path d="M12 19.5v-11m0 0-4 4m4-4 4 4M5.5 4.5h13"/>',
@@ -1057,7 +1058,7 @@ function detailBody(detail) {
       h('div', {},
         plot,
         more,
-        detail.type === 'tv' ? null : h('div', { class: 'detail-actions' }, movieButton(detail))),
+        detail.type === 'tv' ? null : h('div', { class: 'detail-actions' }, movieButton(detail), previewButton(() => openPreview(detail)))),
       credits.length ? h('dl', { class: 'credits' }, credits) : null),
     detail.type === 'tv' ? h('section', { class: 'seasons', id: 'seasons', 'aria-label': 'Episodi' }) : null,
     detail.related?.length ? h('section', { class: 'related', 'aria-label': 'Correlati' },
@@ -1091,6 +1092,81 @@ function updateMovieButton(button, detail) {
   if (button.dataset.icon !== iconName) {
     button.dataset.icon = iconName;
     $('svg', button).replaceWith(icon(iconName));
+  }
+}
+
+/* ---------- Preview ---------- */
+
+const AUDIO_NAMES = { ita: 'italiano', jpn: 'giapponese', eng: 'inglese' };
+let previewRequest = 0;
+
+function previewButton(onclick, size = '') {
+  return h('button', { class: `button ghost${size ? ` ${size}` : ''}`, type: 'button', onclick }, icon('play'), 'Anteprima');
+}
+
+function clock(seconds) {
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const rest = String(Math.floor(seconds % 60)).padStart(2, '0');
+  return hours ? `${hours}:${String(minutes).padStart(2, '0')}:${rest}` : `${minutes}:${rest}`;
+}
+
+function previewEpisode() {
+  const episodes = Array.isArray(state.episodes) ? state.episodes : [];
+
+  // The first selected episode, or the first of the list
+  const episode = episodes.find((item) => state.selected.has(item.id)) || episodes[0];
+  if (episode && state.detail) openPreview(state.detail, episode);
+}
+
+async function openPreview(title, episode = null) {
+  const requestId = ++previewRequest;
+  const layer = $('#preview');
+  const stage = $('#preview-stage');
+
+  $('#preview-title').textContent = episode ? `${title.name} · Episodio ${episode.number}` : title.name;
+  $('#preview-meta').textContent = 'Qualche minuto da metà video, nella stessa qualità del download';
+  stage.replaceChildren(h('div', { class: 'preview-wait', role: 'status' },
+    h('span', { class: 'preview-spinner', 'aria-hidden': 'true' }),
+    h('strong', {}, 'Preparo l’anteprima…'),
+    h('span', {}, 'Ci vogliono circa 20 secondi')));
+  openLayer(layer);
+
+  const params = new URLSearchParams({ source: title.source || 'sc', id: title.id, type: title.type });
+  if (episode) params.set('episode_id', episode.id);
+
+  try {
+    const result = await api(`/api/preview?${params}`);
+    if (requestId !== previewRequest || !layers.includes(layer)) return;
+
+    // Anime have the audio inside the video: dubbed copies are in italian, the others in japanese with subtitles
+    const code = result.language || (isAnime(title) ? (title.dub ? 'ita' : 'jpn') : null);
+    const language = AUDIO_NAMES[code] || code;
+    $('#preview-meta').textContent = [
+      result.quality,
+      language ? `Audio ${language}` : null,
+      isAnime(title) && code !== 'ita' ? 'sottotitoli in italiano' : null,
+      `da ${clock(result.start)} a ${clock(result.start + result.length)} di ${clock(result.total)}`,
+    ].filter(Boolean).join(' · ');
+
+    const video = h('video', { src: result.url, controls: true, autoplay: true, playsinline: true, preload: 'auto' });
+    stage.replaceChildren(video);
+    video.focus({ preventScroll: true });
+  } catch (error) {
+    if (requestId !== previewRequest || !layers.includes(layer)) return;
+    stage.replaceChildren(errorState(error, () => openPreview(title, episode)));
+  }
+}
+
+function stopPreview() {
+  previewRequest += 1;
+
+  // Without its source the video stops asking the file
+  const video = $('#preview-stage video');
+  if (video) {
+    video.pause();
+    video.removeAttribute('src');
+    video.load();
   }
 }
 
@@ -1188,6 +1264,7 @@ function episodesToolbar() {
   return h('div', { class: 'toolbar' },
     h('button', { class: 'button ghost small', type: 'button', id: 'select-all', onclick: toggleAllEpisodes }, 'Seleziona tutti'),
     h('button', { class: 'button primary small', type: 'button', id: 'download-selected', onclick: queueSelectedEpisodes }, icon('download'), h('span', {}, 'Scarica')),
+    previewButton(previewEpisode, 'small'),
     h('span', { class: 'toolbar-count', id: 'selection-count', 'aria-live': 'polite' }));
 }
 
@@ -1686,6 +1763,7 @@ function bindEvents() {
   $('#nas-test').addEventListener('click', testNas);
   $$('.settings-tabs .tab').forEach((tab) => tab.addEventListener('click', () => showSettingsPanel(tab.dataset.panel)));
   $$('#category-switch .category').forEach((button) => button.addEventListener('click', () => setCategory(button.dataset.category)));
+  $('#preview').addEventListener('layerclose', stopPreview);
   $('#detail').addEventListener('layerclose', () => {
     state.detailId += 1;
     state.detail = null;

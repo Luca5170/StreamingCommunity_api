@@ -6,10 +6,12 @@ from Src.Api import anime, film, tv
 from Src.Gui.anime_source import AnimeSource
 from Src.Gui.recommend import Recommender
 from Src.Gui.anime_recommend import AnimeRecommender
+from Src.Lib.FFmpeg import preview
 from Src.Lib.Nas import nas
 from Src.Util import history
 from Src.Util.cancel import DownloadCancelled
 from Src.Util.console import console
+from Src.Api.vixcloud import get_stream
 from Src.Util.os import remove_folder
 
 # General import
@@ -473,6 +475,8 @@ class App:
         self.downloads = DownloadManager(self.site)
         self.recommender = Recommender(self.site, format_title)
         self.anime_recommender = AnimeRecommender()
+        self.previews = {}
+        self.preview_lock = threading.Lock()
         self.server = None
         self.last_request = time.time()
 
@@ -563,6 +567,58 @@ class App:
 
         return self.anime.episodes(anime_id, start, end)
 
+    def preview(self, query, body):
+        """A few minutes from the middle of a film or an episode, to see and hear its quality before the download"""
+
+        source = 'anime' if query.get('source') == 'anime' else 'sc'
+        title_id = parse_int(query.get('id'), 'id')
+        episode_id = parse_int(query['episode_id'], 'episode_id') if query.get('episode_id') else None
+
+        if source == 'sc' and not self.site.domain:
+            raise ApiError("Imposta prima il dominio del sito", 409)
+        if source == 'sc' and query.get('type') == 'tv' and episode_id is None:
+            raise ApiError("Parametro non valido: episode_id")
+
+        cache_id = (source, title_id, episode_id)
+
+        # One preview at a time, the second request of the same title finds it ready
+        with self.preview_lock:
+            ready = self.previews.get(cache_id)
+            if ready and preview.get_path(ready['name']):
+                return ready
+
+            stream = get_stream(self.get_player(source, title_id, episode_id))
+            result = preview.make_preview(stream['video'], stream['audio'], stream['key'], cache_id)
+
+            width, height = stream['resolution'] or (0, 0)
+            result.update({
+                'url': f"/api/preview/file?name={result['name']}",
+                'quality': f"{height}p" if height else None,
+                'language': stream['language'],
+            })
+            self.previews[cache_id] = result
+            return result
+
+    def get_player(self, source, title_id, episode_id):
+        """Script of the vixcloud player of a film or an episode"""
+
+        if source == 'anime':
+
+            # A film of anime is its first episode
+            if episode_id is None:
+                episodes = anime.client.get_episodes(title_id, 1, 1)
+                if not episodes:
+                    raise ApiError("Episodio non trovato", 404)
+                episode_id = int(episodes[0]['id'])
+
+            return anime.get_player_script(anime.client.get_embed_url(episode_id))
+
+        domain = self.site.domain
+        if episode_id is None:
+            return film.get_iframe(title_id, domain)
+
+        return tv.get_iframe(title_id, episode_id, domain, tv.get_token(title_id, domain))
+
     def list_downloads(self, query, body):
         return {'jobs': self.downloads.list()}
 
@@ -638,6 +694,7 @@ ROUTES = {
     ('GET', '/api/anime/title'): App.anime_title,
     ('GET', '/api/anime/episodes'): App.anime_episodes,
     ('GET', '/api/anime/recommendations'): App.anime_recommendations,
+    ('GET', '/api/preview'): App.preview,
     ('GET', '/api/downloads'): App.list_downloads,
     ('POST', '/api/downloads'): App.add_downloads,
     ('POST', '/api/downloads/remove'): App.remove_download,
@@ -673,6 +730,11 @@ class Handler(BaseHTTPRequestHandler):
 
         if method == 'GET' and not url.path.startswith('/api/'):
             return self.send_static(url.path)
+
+        # The video of the preview is sent in pieces, the player asks the part it needs
+        if method == 'GET' and url.path == '/api/preview/file':
+            path = preview.get_path(parse_qs(url.query).get('name', [''])[0])
+            return self.send_video(path) if path else self.send_json({'error': "Anteprima non trovata"}, 404)
 
         route = ROUTES.get((method, url.path))
         if route is None:
@@ -720,6 +782,43 @@ class Handler(BaseHTTPRequestHandler):
 
         with open(file_path, 'rb') as file:
             self.send_body(file.read(), CONTENT_TYPES[extension])
+
+    def send_video(self, path):
+        size = os.path.getsize(path)
+        start, end = 0, size - 1
+        match = re.fullmatch(r'bytes=(\d*)-(\d*)', self.headers.get('Range', '').strip())
+
+        if match and (match.group(1) or match.group(2)):
+            if match.group(1):
+                start = int(match.group(1))
+                end = min(int(match.group(2)), size - 1) if match.group(2) else size - 1
+            else:
+                start = max(0, size - int(match.group(2)))
+
+            if start > end:
+                self.send_response(416)
+                self.send_header('Content-Range', f'bytes */{size}')
+                self.end_headers()
+                return
+
+        self.send_response(206 if match else 200)
+        self.send_header('Content-Type', 'video/mp4')
+        self.send_header('Accept-Ranges', 'bytes')
+        self.send_header('Content-Length', str(end - start + 1))
+        if match:
+            self.send_header('Content-Range', f'bytes {start}-{end}/{size}')
+        self.send_header('Cache-Control', 'no-store')
+        self.end_headers()
+
+        with open(path, 'rb') as file:
+            file.seek(start)
+            remaining = end - start + 1
+            while remaining > 0:
+                chunk = file.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                remaining -= len(chunk)
 
     def send_json(self, data, status=200):
         self.send_body(json.dumps(data).encode('utf-8'), 'application/json; charset=utf-8', status)

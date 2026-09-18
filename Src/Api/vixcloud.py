@@ -84,3 +84,23 @@ def get_m3u8_key(m3u8_url):
     else:
         console.log(f"[red]Error: {req.status_code}")
         sys.exit(0)
+
+def get_stream(embed_content):
+    """Video with the best quality, audio and key of a player, used by the preview"""
+
+    master_playlist = get_master_playlist(get_playlist(parse_content(embed_content)))
+
+    if not master_playlist.playlists:
+        raise ValueError("Video non disponibile")
+
+    best = max(master_playlist.playlists, key=lambda playlist: playlist.stream_info.bandwidth or 0)
+    audio_url = get_m3u8_audio(master_playlist)
+    audio = next((media for media in master_playlist.media if media.type == "AUDIO" and media.uri == audio_url), None)
+
+    return {
+        'video': best.uri,
+        'audio': audio_url,
+        'key': get_m3u8_key(best.uri),
+        'resolution': best.stream_info.resolution,
+        'language': audio.language if audio else None,
+    }
