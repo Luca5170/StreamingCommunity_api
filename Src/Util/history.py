@@ -1,7 +1,10 @@
 # 18.09.26
 
+# Class import
+from Src.Util import storage
+
 # General import
-import json, threading, time
+import threading, time
 
 # Variable
 HISTORY_FILE = "history.json"
@@ -11,18 +14,16 @@ lock = threading.Lock()
 def load():
     """Titles downloaded in the past, a series is kept once"""
 
-    try:
-        with open(HISTORY_FILE, 'r', encoding='utf-8') as file:
-            data = json.load(file)
-    except (FileNotFoundError, ValueError):
+    # A damaged file falls back to its last good copy, the history is never lost for a power cut
+    data = storage.read_json(HISTORY_FILE, {})
+    if not isinstance(data, dict):
         data = {}
 
     # Films and series, anime are imported by themselves
     return {'imported': bool(data.get('imported')), 'imported_anime': bool(data.get('imported_anime')), 'titles': data.get('titles') or []}
 
 def save(data):
-    with open(HISTORY_FILE, 'w', encoding='utf-8') as file:
-        json.dump(data, file, indent=4, ensure_ascii=False)
+    storage.write_json(HISTORY_FILE, data, indent=4)
 
 def get_key(title):
     """Titles of different sites can have the same id"""

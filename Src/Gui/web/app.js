@@ -1077,7 +1077,8 @@ function updateMovieButton(button, detail) {
   const percent = Math.floor(jobPercent(job));
   const [style, iconName, label, disabled] = {
     queued: ['glass', 'download', 'In coda', true],
-    running: ['glass', 'download', job?.cancel ? 'Annullamento…' : job?.stage ? `Download in corso · ${percent}%` : 'Avvio del download…', true],
+    waiting: ['glass', 'retry', 'Problema temporaneo · riprovo da solo', true],
+    running: ['glass', 'download', job?.cancel ? 'Annullamento…' : job?.waiting === 'offline' ? `In pausa, senza connessione · ${percent}%` : job?.stage ? `Download in corso · ${percent}%` : 'Avvio del download…', true],
     done: job?.remote && !job?.warning
       ? ['success', 'check', 'Caricato sul NAS', true]
       : ['success', 'check', 'Scaricato · Mostra file', false],
@@ -1363,7 +1364,8 @@ function refreshDetailStates() {
     chip.className = `episode-state ${status}`;
     chip.textContent = {
       queued: 'In coda',
-      running: job?.cancel ? 'Annullamento…' : job?.stage ? `${Math.floor(jobPercent(job))}%` : 'Avvio…',
+      waiting: 'Riprovo…',
+      running: job?.cancel ? 'Annullamento…' : job?.waiting === 'offline' ? 'In pausa' : job?.stage ? `${Math.floor(jobPercent(job))}%` : 'Avvio…',
       done: job?.warning ? 'Sul PC' : job?.remote ? 'Sul NAS' : 'Scaricato',
       error: 'Errore',
     }[status] || '';
@@ -1415,13 +1417,40 @@ async function pollDownloads() {
 
   try {
     const { jobs } = await api('/api/downloads');
+    setServerReachable(true);
     setJobs(jobs);
   } catch {
-    // Server not reachable, try again later
+    // Server not reachable: the page stays, it tries again by itself
+    setServerReachable(false);
   }
 
-  const active = state.jobs.some((job) => job.status === 'queued' || job.status === 'running');
-  state.pollTimer = setTimeout(pollDownloads, active ? 800 : 3000);
+  const active = state.jobs.some((job) => job.status === 'queued' || job.status === 'running' || job.status === 'waiting');
+  state.pollTimer = setTimeout(pollDownloads, state.serverDown ? 3000 : active ? 800 : 3000);
+}
+
+/* ---------- Connection ---------- */
+
+function setServerReachable(reachable) {
+  if (state.serverDown === !reachable) return;
+  state.serverDown = !reachable;
+
+  if (reachable && state.serverWasDown) toast('Il programma risponde di nuovo', 'success');
+  if (!reachable) state.serverWasDown = true;
+  renderConnectionBanner();
+}
+
+function renderConnectionBanner() {
+  const banner = $('#connection-banner');
+  let text = '';
+
+  if (state.serverDown) {
+    text = 'Il programma non risponde. Se l’hai chiuso riaprilo da SC Downloader: i download ripartono da dove erano. Riprovo da solo…';
+  } else if (!navigator.onLine) {
+    text = 'Connessione a internet assente: i download sono in pausa e riprendono da soli quando torna.';
+  }
+
+  banner.hidden = !text;
+  $('.connection-text', banner).textContent = text;
 }
 
 function setJobs(jobs) {
@@ -1439,6 +1468,7 @@ function setJobs(jobs) {
     else if (job.status === 'done' && job.remote) toast(`Caricato sul NAS: ${jobName(job)}`, 'success');
     else if (job.status === 'done') toast(`Download completato: ${jobName(job)}`, 'success', { action: 'Mostra', onAction: () => openFolder(job.id) });
     if (job.status === 'error') toast(`Download non riuscito: ${jobName(job)}`, 'error', { action: 'Dettagli', onAction: openDownloads });
+    if (job.status === 'waiting') toast(`${jobName(job)}: problema temporaneo, riprovo da solo tra poco`, 'warning', { action: 'Dettagli', onAction: openDownloads });
     if (job.status === 'cancelled') toast(`Download annullato: ${jobName(job)}`, 'info');
   }
 
@@ -1446,7 +1476,7 @@ function setJobs(jobs) {
 }
 
 function findJob(title, episodeId = null) {
-  const priority = { running: 0, queued: 1, done: 2, error: 3, cancelled: 4 };
+  const priority = { running: 0, queued: 1, waiting: 1, done: 2, error: 3, cancelled: 4 };
   const source = title.source || 'sc';
 
   return state.jobs
@@ -1485,6 +1515,11 @@ function estimateSeconds(job, percent) {
   return sample.rate ? (100 - percent) / sample.rate : null;
 }
 
+function formatDelay(seconds) {
+  if (seconds < 60) return `${seconds} s`;
+  return `${Math.ceil(seconds / 60)} min`;
+}
+
 function formatEta(seconds) {
   if (!seconds || !Number.isFinite(seconds)) return '';
   if (seconds < 60) return 'meno di 1 min';
@@ -1513,7 +1548,7 @@ function renderJobs() {
   }
 
   // Running first, then queue in order, then finished from the newest
-  const order = { running: 0, queued: 1, error: 2, done: 2, cancelled: 2 };
+  const order = { running: 0, queued: 1, waiting: 1, error: 2, done: 2, cancelled: 2 };
   const jobs = [...state.jobs].sort((a, b) => order[a.status] - order[b.status] || (a.status === 'queued' ? a.id - b.id : b.id - a.id));
 
   jobs.forEach((job, index) => {
@@ -1551,14 +1586,19 @@ function updateJobNode(node, job) {
   let label = '';
   let eta = '';
 
-  node.className = `job ${job.status}${job.warning ? ' warning' : ''}${job.status === 'running' && stage && !job.total ? ' indeterminate' : ''}`;
+  const offline = job.status === 'running' && job.waiting === 'offline';
+  node.className = `job ${job.status}${job.warning ? ' warning' : ''}${offline ? ' offline' : ''}${job.status === 'running' && stage && !job.total ? ' indeterminate' : ''}`;
   $('.progress', node).setAttribute('aria-valuenow', String(Math.round(percent)));
-  $('.progress-bar', node).style.width = `${job.status === 'queued' ? 0 : percent}%`;
+  $('.progress-bar', node).style.width = `${job.status === 'queued' || job.status === 'waiting' ? 0 : percent}%`;
 
   if (job.status === 'queued') {
-    label = 'In coda';
+    label = job.attempt ? `In coda · tentativo ${job.attempt + 1}` : 'In coda';
+  } else if (job.status === 'waiting') {
+    label = `Riprovo ${job.retry_in ? `tra ${formatDelay(job.retry_in)}` : 'appena torna la connessione'}${job.error ? ` · ${job.error}` : ''}`;
   } else if (job.status === 'running' && job.cancel) {
     label = 'Annullamento…';
+  } else if (offline) {
+    label = `Connessione assente · in pausa al ${Math.floor(percent)}%`;
   } else if (job.status === 'running') {
     label = stage ? `${stage.label} · ${Math.floor(percent)}%` : 'Preparazione…';
     eta = stage ? formatEta(estimateSeconds(job, percent)) : '';
@@ -1572,7 +1612,7 @@ function updateJobNode(node, job) {
 
   const stateNode = $('.job-state', node);
   stateNode.textContent = label;
-  stateNode.title = job.warning || job.remote || label;
+  stateNode.title = job.status === 'waiting' ? `${job.error || ''}\n${label}` : job.warning || job.remote || label;
   $('.job-eta', node).textContent = eta;
 
   const actions = $('.job-actions', node);
@@ -1592,7 +1632,7 @@ function jobActions(job) {
   if (job.can_upload) actions.push(button('upload', 'Riprova il caricamento sul NAS', () => retryUpload(job.id)));
   if (job.status === 'error' && !job.can_upload) actions.push(button('retry', 'Riprova il download', () => retryJob(job)));
   if (job.status === 'running' && !job.cancel) actions.push(confirmButton('Annulla il download', () => cancelJob(job.id)));
-  if (job.status !== 'running') actions.push(button('close', job.status === 'queued' ? 'Annulla' : 'Rimuovi dalla lista', () => removeJob(job.id)));
+  if (job.status !== 'running') actions.push(button('close', job.status === 'queued' || job.status === 'waiting' ? 'Annulla' : 'Rimuovi dalla lista', () => removeJob(job.id)));
 
   return actions;
 }
@@ -1637,6 +1677,7 @@ function renderDownloadsSummary() {
   const parts = [
     count('running') ? 'Download in corso' : null,
     count('queued') ? `${count('queued')} in coda` : null,
+    count('waiting') ? `${count('waiting')} in attesa di riprovare` : null,
     count('done') ? plural(count('done'), 'completato', 'completati') : null,
     count('error') ? plural(count('error'), 'non riuscito', 'non riusciti') : null,
     count('cancelled') ? plural(count('cancelled'), 'annullato', 'annullati') : null,
@@ -1648,7 +1689,7 @@ function renderDownloadsSummary() {
 
 function renderDownloadsButton() {
   const running = state.jobs.find((job) => job.status === 'running');
-  const active = state.jobs.filter((job) => job.status === 'queued' || job.status === 'running').length;
+  const active = state.jobs.filter((job) => job.status === 'queued' || job.status === 'running' || job.status === 'waiting').length;
   const percent = running ? jobPercent(running) : 0;
   const button = $('#downloads-button');
   const badge = $('#downloads-badge');
@@ -1746,6 +1787,9 @@ function isTyping(target) {
 }
 
 function bindEvents() {
+  window.addEventListener('online', renderConnectionBanner);
+  window.addEventListener('offline', renderConnectionBanner);
+
   $('#search-form').addEventListener('submit', (event) => {
     event.preventDefault();
     const query = searchInput.value.trim();

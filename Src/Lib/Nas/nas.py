@@ -3,6 +3,7 @@
 # Class import
 from Src.Util.console import console
 from Src.Util.cancel import DownloadCancelled
+from Src.Util import storage
 
 # General import
 import json, os, posixpath, re, socket, time
@@ -38,22 +39,21 @@ class NasError(Exception):
 def load_config():
     """Read nas settings, password is not saved here"""
 
-    try:
-        with open(CONFIG_FILE, 'r') as file:
-            saved = json.load(file)
-    except (FileNotFoundError, ValueError):
-        saved = {}
+    saved = storage.read_json(CONFIG_FILE, {})
+    config = {**DEFAULT_CONFIG, **(saved if isinstance(saved, dict) else {})}
 
-    config = {**DEFAULT_CONFIG, **saved}
-    config['port'] = int(config['port'] or 22)
+    try:
+        config['port'] = int(config['port'] or 22)
+    except (TypeError, ValueError):
+        config['port'] = 22
+
     return config
 
 def save_config(config):
     config = {key: config.get(key, value) for key, value in DEFAULT_CONFIG.items()}
     config['port'] = int(config['port'] or 22)
 
-    with open(CONFIG_FILE, 'w') as file:
-        json.dump(config, file, indent=4)
+    storage.write_json(CONFIG_FILE, config, indent=4)
 
     return config
 
@@ -157,6 +157,15 @@ def rename_local(local_path, media):
 
 
 # [ connection ]
+def is_reachable(config, timeout=3):
+    """Fast check that the nas is on, without logging in"""
+
+    try:
+        socket.create_connection((config['host'], config['port']), timeout=timeout).close()
+        return True
+    except (OSError, ValueError):
+        return False
+
 @contextmanager
 def open_sftp(config, password=None):
     """Open a sftp connection to the nas"""
@@ -205,7 +214,17 @@ def open_sftp(config, password=None):
         pass
 
     try:
-        yield client.open_sftp()
+        # A nas that goes off in the middle is noticed in a minute, the transfer does not hang forever
+        client.get_transport().set_keepalive(15)
+        sftp = client.open_sftp()
+        sftp.get_channel().settimeout(60)
+
+    except (paramiko.SSHException, socket.error, OSError) as e:
+        client.close()
+        raise NasError(f"Impossibile aprire la connessione SFTP con il NAS: {e}")
+
+    try:
+        yield sftp
     finally:
         client.close()
 
@@ -277,9 +296,12 @@ def upload(config, local_path, remote_path, password=None, progress=None):
         make_folders(sftp, folder)
 
         # Half files left by a program closed during an upload
-        for name in sftp.listdir(folder):
-            if name.endswith('.parte'):
-                sftp.remove(posixpath.join(folder, name))
+        try:
+            for name in sftp.listdir(folder):
+                if name.endswith('.parte'):
+                    sftp.remove(posixpath.join(folder, name))
+        except (IOError, OSError):
+            pass
 
         try:
             sftp.put(local_path, temp_path, callback=progress)
@@ -292,18 +314,23 @@ def upload(config, local_path, remote_path, password=None, progress=None):
             remove_partial(sftp, temp_path)
             raise NasError(f"Trasferimento sul NAS non riuscito: {e}")
 
-        uploaded = sftp.stat(temp_path).st_size
-
-        if uploaded != size:
-            sftp.remove(temp_path)
-            raise NasError(f"Trasferimento incompleto, {uploaded} byte invece di {size}")
-
         try:
-            sftp.remove(remote_path)
-        except IOError:
-            pass
+            uploaded = sftp.stat(temp_path).st_size
 
-        sftp.rename(temp_path, remote_path)
+            if uploaded != size:
+                remove_partial(sftp, temp_path)
+                raise NasError(f"Trasferimento incompleto, {uploaded} byte invece di {size}")
+
+            try:
+                sftp.remove(remote_path)
+            except IOError:
+                pass
+
+            sftp.rename(temp_path, remote_path)
+
+        except (IOError, OSError, paramiko.SSHException) as e:
+            remove_partial(sftp, temp_path)
+            raise NasError(f"Il NAS non ha completato il salvataggio del file: {e}")
 
     return remote_path
 
@@ -349,10 +376,13 @@ def finalize(local_path, media=None, progress_callback=None):
     if not is_enabled(config):
         return result
 
-    remote_path = get_remote_path(config, media)
-    console.print(f"[green]Upload to nas [white]=> [cyan]{remote_path}")
-
     try:
+        remote_path = get_remote_path(config, media)
+        console.print(f"[green]Upload to nas [white]=> [cyan]{remote_path}")
+
+        if not os.path.isfile(local_path):
+            raise NasError("Il file da caricare non c'è più")
+
         if progress_callback != None:
             progress_callback("upload", 0, os.path.getsize(local_path))
 
@@ -374,6 +404,13 @@ def finalize(local_path, media=None, progress_callback=None):
         result['warning'] = f"Errore inatteso durante il caricamento: {e}"
         return result
 
-    os.remove(local_path)
+    # The file is on the nas, a copy that cant be removed here is only a warning
+    try:
+        os.remove(local_path)
+    except OSError as e:
+        console.log(f"[yellow]NAS: file caricato, ma la copia locale non si può eliminare ({e})")
+        result.update(remote=remote_path)
+        return result
+
     result.update(path=None, remote=remote_path)
     return result

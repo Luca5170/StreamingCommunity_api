@@ -3,9 +3,12 @@
 # Class import
 from Src.Util.headers import get_headers
 from Src.Util.console import console, msg
+from Src.Util.errors import DownloadError
+from Src.Util import http
 from Src.Lib.FFmpeg.my_m3u8 import download_m3u8
 from Src.Lib.Nas.nas import finalize
 from Src.Api.page import get_base_url, get_page_props, get_title
+from Src.Api.film import get_player_script
 from Src.Api.vixcloud import parse_content, get_playlist, get_master_playlist, get_m3u8_url, get_m3u8_audio, get_m3u8_key
 
 # General import
@@ -16,8 +19,13 @@ from bs4 import BeautifulSoup
 # [func]
 def get_token(id_tv, domain):
     session = requests.Session()
-    session.get(f"{get_base_url(domain)}/watch/{id_tv}", headers={'user-agent': get_headers()})
-    return session.cookies['XSRF-TOKEN']
+    http.get(f"{get_base_url(domain)}/watch/{id_tv}", session=session, headers={'user-agent': get_headers()})
+
+    token = session.cookies.get('XSRF-TOKEN')
+    if not token:
+        raise DownloadError("Il sito non ha dato il permesso di guardare l'episodio, riprova")
+
+    return token
 
 def get_info_tv(id_film, title_name, site_version, domain):
 
@@ -45,24 +53,20 @@ def get_info_season(tv_id, tv_name, domain, version, token, n_stagione):
         sys.exit(0)
 
 def get_iframe(tv_id, ep_id, domain, token):
-    req = requests.get(f'{get_base_url(domain)}/iframe/{tv_id}', params={'episode_id': ep_id, 'next_episode': '1'}, cookies={'XSRF-TOKEN': token}, headers={
+    req = http.get(f'{get_base_url(domain)}/iframe/{tv_id}', params={'episode_id': ep_id, 'next_episode': '1'}, cookies={'XSRF-TOKEN': token}, headers={
         'referer': f'{get_base_url(domain)}/watch/{tv_id}?e={ep_id}',
         'user-agent': get_headers()
     })
 
-    # Change user agent m3u8
-    custom_headers_req = {
-        'referer': f'{get_base_url(domain)}/watch/{tv_id}?e={ep_id}',
-        'user-agent': get_headers()
-    }
+    if not req.ok:
+        # A title that is not on the site is not there also at the next attempt
+        raise DownloadError(f"Il sito ha risposto con errore {req.status_code}", retry=req.status_code not in (404, 410))
 
-    if req.ok:
-        url_embed = BeautifulSoup(req.text, "lxml").find("iframe").get("src")
-        req_embed = requests.get(url_embed, headers = {"User-agent": get_headers()}).text
-        return BeautifulSoup(req_embed, "lxml").find("body").find("script").text
-    else:
-        console.log(f"[red]Error: {req.status_code}")
-        sys.exit(0)
+    iframe = BeautifulSoup(req.text, "lxml").find("iframe")
+    if iframe is None or not iframe.get("src"):
+        raise DownloadError("Episodio non disponibile sul sito", retry=False)
+
+    return get_player_script(iframe.get("src"))
 
 
 # [func \ main]

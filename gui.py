@@ -3,10 +3,10 @@
 # Class
 from Src.Gui.server import main
 from Src.Util.console import console
-from Src.Util.os import remove_folder
+from Src.Util.log import log_error
 
 # Import
-import sys
+import sys, traceback
 
 if __name__ == '__main__':
 
@@ -14,10 +14,10 @@ if __name__ == '__main__':
         console.log("Install python version > 3.11")
         sys.exit(0)
 
-    remove_folder("tmp")
-
+    # Temporary files are cleaned by main: segments of unfinished downloads are kept, they are resumed
     try:
         main()
-    finally:
-        # Files of a download stopped together with the program
-        remove_folder("tmp")
+    except Exception as e:
+        log_error("The program stopped", e)
+        traceback.print_exc()
+        sys.exit(1)

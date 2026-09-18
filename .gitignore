@@ -22,3 +22,11 @@ debug.log
 nas.json
 nas_known_hosts
 history.json
+
+# State of the program on this pc: queue of the downloads, error log, lock of the open program
+downloads.json
+logs/
+sc_downloader.lock
+sc_downloader.instance.json
+*.bak
+*.tmp

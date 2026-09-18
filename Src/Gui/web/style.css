@@ -2039,6 +2039,55 @@ a {
   color: var(--accent);
 }
 
+/* Waiting for the connection or for a new attempt: nothing is lost, it goes on by itself */
+.job.waiting,
+.job.offline {
+  border-color: rgba(255, 181, 71, 0.2);
+}
+
+.job.waiting .job-state,
+.job.offline .job-state {
+  color: var(--accent);
+}
+
+.job.offline .progress-bar::after {
+  animation: none;
+}
+
+.connection-banner {
+  position: fixed;
+  top: calc(var(--topbar) + 10px);
+  left: 50%;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: min(640px, calc(100% - 32px));
+  padding: 12px 18px;
+  border: 1px solid rgba(255, 181, 71, 0.35);
+  border-radius: 14px;
+  background: rgba(30, 24, 14, 0.94);
+  backdrop-filter: blur(14px);
+  box-shadow: 0 20px 50px -20px rgba(0, 0, 0, 0.9);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.45;
+  transform: translateX(-50%);
+}
+
+.connection-banner[hidden] {
+  display: none;
+}
+
+.connection-dot {
+  flex-shrink: 0;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
 .job.error .progress-bar {
   width: 100% !important;
   background: rgba(255, 95, 109, 0.5);

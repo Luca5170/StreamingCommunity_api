@@ -3,6 +3,8 @@
 # Class import
 from Src.Util.headers import get_headers
 from Src.Util.console import console
+from Src.Util.errors import DownloadError
+from Src.Util import http
 
 # General import
 import requests, re, sys
@@ -20,8 +22,7 @@ def parse_content(embed_content):
     url = re.search(r"""['"]?url['"]?\s*:\s*['"]([^'"]+)['"]""", master_playlist)
 
     if not (token and expires and url):
-        console.log("[red]Cant play this video, (video not available)")
-        sys.exit(0)
+        raise DownloadError("Video non disponibile (il player non ha i dati del video)")
 
     return {
         'token': token.group(1),
@@ -43,19 +44,17 @@ def get_playlist(json_win_param):
     return urlunparse(playlist_url._replace(query=urlencode(params, doseq=True)))
 
 def get_master_playlist(m3u8_playlist):
-    req = requests.get(m3u8_playlist, headers={'user-agent': get_headers()})
+    req = http.get(m3u8_playlist, headers={'user-agent': get_headers()})
 
-    if req.ok:
-        return M3U8(req.text)
-    else:
-        console.log(f"[red]Error: {req.status_code}")
-        sys.exit(0)
+    if not req.ok:
+        raise DownloadError(f"Il player ha risposto con errore {req.status_code}")
+
+    return M3U8(req.text)
 
 def get_m3u8_url(master_playlist):
 
     if not master_playlist.playlists:
-        console.log("[red]Cant find video playlist")
-        sys.exit(0)
+        raise DownloadError("Il player non ha nessun video")
 
     # Select video playlist with best quality
     best_playlist = max(master_playlist.playlists, key=lambda playlist: playlist.stream_info.bandwidth or 0)
@@ -77,13 +76,12 @@ def get_m3u8_audio(master_playlist):
     return audio_tracks[0].uri if audio_tracks else None
 
 def get_m3u8_key(m3u8_url):
-    req = requests.get(urljoin(m3u8_url, '/storage/enc.key'), headers={'user-agent': get_headers()})
+    req = http.get(urljoin(m3u8_url, '/storage/enc.key'), headers={'user-agent': get_headers()})
 
-    if req.ok:
-        return "".join(["{:02x}".format(c) for c in req.content])
-    else:
-        console.log(f"[red]Error: {req.status_code}")
-        sys.exit(0)
+    if not req.ok or len(req.content) != 16:
+        raise DownloadError(f"Chiave del video non disponibile (errore {req.status_code})")
+
+    return req.content.hex()
 
 def get_stream(embed_content):
     """Video with the best quality, audio and key of a player, used by the preview"""

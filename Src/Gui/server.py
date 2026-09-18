@@ -4,12 +4,15 @@
 import Src.Api.page as Page
 from Src.Api import anime, film, tv
 from Src.Gui.anime_source import AnimeSource
+from Src.Gui import instance
 from Src.Gui.recommend import Recommender
 from Src.Gui.anime_recommend import AnimeRecommender
 from Src.Lib.FFmpeg import preview
 from Src.Lib.Nas import nas
-from Src.Util import history
+from Src.Util import history, storage
 from Src.Util.cancel import DownloadCancelled
+from Src.Util.errors import DownloadError, describe, is_disk_full, is_network_error, is_online
+from Src.Util.log import log_error
 from Src.Util.console import console
 from Src.Api.vixcloud import get_stream
 from Src.Util.os import remove_folder
@@ -25,6 +28,13 @@ WEB_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 DATA_FILE = "data.json"
 VIDEOS_FOLDER = "videos"
 DEFAULT_PORT = 8765
+JOBS_FILE = "downloads.json"
+MAX_SAVED_JOBS = 300
+ACTIVE = ('queued', 'running', 'waiting')
+RETRY_DELAYS = (30, 120, 600)       # Seconds before the automatic attempts after an error
+NAS_RETRY_INTERVAL = 120            # How often the files the nas refused are tried again
+MAX_AUTO_UPLOADS = 5
+SEGMENTS_MAX_AGE = 7 * 24 * 3600    # Segments of a download not resumed for a week are removed
 CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
@@ -50,11 +60,8 @@ class Site:
         self.version = None
 
     def read_data(self):
-        try:
-            with open(DATA_FILE, 'r') as file:
-                return json.load(file)
-        except (FileNotFoundError, ValueError):
-            return {}
+        data = storage.read_json(DATA_FILE, {})
+        return data if isinstance(data, dict) else {}
 
     def connect(self, domain=None):
         """Get version of the site and save the domain if it works"""
@@ -74,8 +81,12 @@ class Site:
 
         data = self.read_data()
         data['domain'] = domain
-        with open(DATA_FILE, 'w') as file:
-            json.dump(data, file)
+
+        # The site works also if the domain cant be saved, it is asked again at the next start
+        try:
+            storage.write_json(DATA_FILE, data)
+        except OSError as e:
+            console.log(f"[yellow]Domain not saved: {e}")
 
     def status(self):
         error = None
@@ -212,7 +223,10 @@ def open_in_explorer(path):
 
 # [ downloads ]
 class DownloadManager:
-    """Queue of downloads, executed one at a time because they share tmp folder"""
+    """
+    Queue of downloads, executed one at a time.
+    The queue is saved on disk: after a crash or a power cut the downloads go on from where they were.
+    """
 
     def __init__(self, site):
         self.site = site
@@ -220,21 +234,71 @@ class DownloadManager:
         self.lock = threading.Lock()
         self.queue = queue.Queue()
         self.next_id = itertools.count(1)
+        self.load()
+
         threading.Thread(target=self.worker, daemon=True).start()
+        threading.Thread(target=self.scheduler, daemon=True).start()
 
-    def make_job(self, item):
-        if not isinstance(item, dict):
-            raise ApiError("Elemento da scaricare non valido")
+    # [ saved queue ]
+    def load(self):
+        """Downloads of the last time: the ones not finished start again by themselves"""
 
-        job = {
+        saved = storage.read_json(JOBS_FILE, {})
+        jobs = saved.get('jobs') if isinstance(saved, dict) else None
+        resumed = 0
+
+        for job in jobs if isinstance(jobs, list) else []:
+            if not isinstance(job, dict) or not isinstance(job.get('id'), int):
+                continue
+
+            job = {**self.empty_job(), **job, 'cancel': False, 'stage': None, 'done': 0, 'total': 0, 'waiting': None}
+
+            if job['status'] in ('queued', 'running', 'waiting'):
+                # An upload whose file is gone cant go on
+                if job['upload_only'] and not (job['output'] and os.path.isfile(job['output'])):
+                    job.update(status='error', error="Il file da caricare non c'è più", upload_only=False)
+                else:
+                    job.update(status='queued', retry_at=None)
+                    resumed += 1
+
+            elif job['status'] not in ('done', 'error', 'cancelled'):
+                continue
+
+            self.jobs.append(job)
+
+        self.jobs = self.jobs[-MAX_SAVED_JOBS:]
+        self.next_id = itertools.count(max((job['id'] for job in self.jobs), default=0) + 1)
+
+        for job in self.jobs:
+            if job['status'] == 'queued':
+                self.queue.put(job)
+
+        if resumed:
+            console.print(f"[green]Resumed {resumed} downloads of the last time")
+
+    def save(self):
+        """Write the queue on disk, a full disk is not a reason to stop the downloads"""
+
+        with self.lock:
+            jobs = [{key: value for key, value in job.items() if key not in ('cancel', 'stage', 'done', 'total', 'waiting')}
+                    for job in self.jobs if job['status'] != 'removed']
+
+        try:
+            storage.write_json(JOBS_FILE, {'jobs': jobs[-MAX_SAVED_JOBS:]}, indent=2)
+        except Exception as e:
+            log_error("Downloads queue not saved", e)
+
+    # [ jobs ]
+    def empty_job(self):
+        return {
             'id': None,
-            'source': 'anime' if item.get('source') == 'anime' else 'sc',
-            'title_id': parse_int(item.get('id'), 'id'),
-            'slug': parse_slug(item.get('slug')),
-            'name': str(item.get('name') or item.get('slug')),
-            'type': 'tv' if item.get('type') == 'tv' else 'movie',
-            'year': str(item.get('year'))[:4] if item.get('year') else None,
-            'poster': item.get('poster') if isinstance(item.get('poster'), str) else None,
+            'source': 'sc',
+            'title_id': None,
+            'slug': None,
+            'name': None,
+            'type': 'movie',
+            'year': None,
+            'poster': None,
             'season': None,
             'episode_id': None,
             'episode_number': None,
@@ -249,6 +313,26 @@ class DownloadManager:
             'remote': None,
             'upload_only': False,
             'cancel': False,
+            'attempt': 0,               # Automatic attempts after an error
+            'retry_at': None,
+            'waiting': None,            # 'offline' while the connection is missing
+            'auto_uploads': 0,
+            'upload_cancelled': False,
+        }
+
+    def make_job(self, item):
+        if not isinstance(item, dict):
+            raise ApiError("Elemento da scaricare non valido")
+
+        job = {
+            **self.empty_job(),
+            'source': 'anime' if item.get('source') == 'anime' else 'sc',
+            'title_id': parse_int(item.get('id'), 'id'),
+            'slug': parse_slug(item.get('slug')),
+            'name': str(item.get('name') or item.get('slug')),
+            'type': 'tv' if item.get('type') == 'tv' else 'movie',
+            'year': str(item.get('year'))[:4] if item.get('year') else None,
+            'poster': item.get('poster') if isinstance(item.get('poster'), str) else None,
         }
 
         if job['source'] == 'anime':
@@ -273,7 +357,7 @@ class DownloadManager:
             for job in jobs:
                 # Ids of the two sites can be the same number
                 key = (job['source'], job['title_id'], job['episode_id'])
-                duplicate = next((other for other in self.jobs if other['status'] in ('queued', 'running')
+                duplicate = next((other for other in self.jobs if other['status'] in ACTIVE
                                   and (other['source'], other['title_id'], other['episode_id']) == key), None)
 
                 if duplicate is None:
@@ -282,50 +366,161 @@ class DownloadManager:
                     self.queue.put(job)
                     added.append(job)
 
+        self.save()
         return [dict(job) for job in added]
 
+    # [ worker ]
     def worker(self):
+        """Nothing can stop the queue: an unexpected error ends only its download"""
+
         while True:
             job = self.queue.get()
 
-            with self.lock:
-                if job['status'] != 'queued':
-                    continue
-                job['status'] = 'running'
-
-            console.print(f"\n[green]GUI download [white]=> [cyan]{job['name']}")
-            progress = lambda stage, done, total: self.update(job, stage, done, total)
-            output, remote, warning, status, error = None, None, None, 'done', None
-
             try:
-                if job['upload_only']:
-                    result = nas.finalize(job['output'], self.get_media(job), progress)
+                self.run(job)
 
-                else:
-                    # Segments of a download that failed must not end up in the next one
-                    remove_folder("tmp")
-                    result = self.download(job, progress)
+            except BaseException as e:
+                log_error(f"Unexpected error in the downloads queue ({job.get('name')})", e)
+                with self.lock:
+                    if job['status'] == 'running':
+                        job.update(status='error', error=describe(e), waiting=None)
+                self.save()
 
-                # A nas that does not answer leaves the file here, with a warning
-                output, remote, warning = result['path'], result['remote'], result['warning']
+    def run(self, job):
+        with self.lock:
+            if job['status'] != 'queued':
+                return
+            job.update(status='running', waiting=None, retry_at=None, stage=None, done=0, total=0)
 
-            except DownloadCancelled:
-                # Nothing of a cancelled download is kept
-                remove_folder("tmp")
+        self.save()
+        console.print(f"\n[green]GUI download [white]=> [cyan]{job['name']}")
+        progress = lambda stage, done, total: self.update(job, stage, done, total)
+        output, remote, warning, status, error, retry = None, None, None, 'done', None, False
+        upload_only = job['upload_only']
+
+        try:
+            if upload_only:
+                result = nas.finalize(job['output'], self.get_media(job), progress)
+            else:
+                result = self.download(job, progress)
+
+            # A nas that does not answer leaves the file here, with a warning
+            output, remote, warning = result['path'], result['remote'], result['warning']
+
+        except DownloadCancelled as e:
+            if e.keep_files:
+                # The program is closing: the download goes on at the next start
+                status = 'queued'
+                console.print(f"[yellow]GUI download paused [white]=> [cyan]{job['name']}")
+            else:
                 status = 'cancelled'
                 console.print(f"[yellow]GUI download cancelled [white]=> [cyan]{job['name']}")
 
-            except SystemExit:
-                status, error = 'error', "Download non riuscito, dettagli nella console"
-            except Exception as e:
-                status, error = 'error', str(e) or type(e).__name__
+        except SystemExit:
+            status, error, retry = 'error', "Download non riuscito, dettagli nella console", True
+            log_error(f"Download stopped by the site code ({job['name']})")
 
-            # Past downloads are the base of the recommendations
-            if status == 'done' and not job['upload_only']:
+        except Exception as e:
+            status, error, retry = 'error', describe(e), self.can_retry(e)
+            console.print(f"[red]GUI download failed [white]=> [cyan]{job['name']}: [red]{error}")
+            log_error(f"Download failed ({job['name']})", e)
+
+        # Past downloads are the base of the recommendations, a history not saved is not a failed download
+        if status == 'done' and not upload_only:
+            try:
                 history.add(job['title_id'], job['slug'], job['name'], job['type'], job['year'], source=job['source'])
+            except Exception as e:
+                log_error("History not saved", e)
 
+        with self.lock:
+            user_cancel = job['cancel'] is True
+
+            if status == 'error' and retry and job['attempt'] < len(RETRY_DELAYS) and not job['cancel']:
+                # Tried again later by itself, the segments already saved are kept
+                delay = RETRY_DELAYS[job['attempt']]
+                job['attempt'] += 1
+                job.update(status='waiting', error=error, retry_at=time.time() + delay, waiting=None)
+                console.print(f"[yellow]New attempt in {delay} seconds [white]=> [cyan]{job['name']}")
+
+            else:
+                job.update(status=status, error=error, waiting=None, cancel=False)
+
+                if status != 'queued':
+                    # A failed upload keeps its file on the pc, a failed download has no file
+                    kept = job['output'] if upload_only else None
+                    job.update(output=output if status == 'done' else kept, remote=remote, warning=warning, upload_only=False)
+
+                if status == 'done':
+                    job['attempt'] = 0
+                    job['upload_cancelled'] = bool(warning and user_cancel)
+
+        self.save()
+
+    def can_retry(self, error):
+        """Errors that can go away by themselves: connection, site busy, expired links"""
+
+        if isinstance(error, DownloadError):
+            return error.retry
+        if isinstance(error, PermissionError) or is_disk_full(error):
+            return False
+
+        return True
+
+    def scheduler(self):
+        """Start again the downloads waiting for a new attempt, and upload the files the nas refused"""
+
+        last_nas_check = time.time()
+
+        while True:
+            time.sleep(2)
+
+            try:
+                self.resume_waiting()
+
+                if time.time() - last_nas_check > NAS_RETRY_INTERVAL:
+                    last_nas_check = time.time()
+                    self.retry_pending_uploads()
+
+            except Exception as e:
+                log_error("Scheduler of the downloads", e)
+
+    def resume_waiting(self):
+        now = time.time()
+
+        with self.lock:
+            ready = [job for job in self.jobs if job['status'] == 'waiting' and job['retry_at'] and job['retry_at'] <= now]
+
+        # Without internet the attempt would fail again at once
+        if not ready or not is_online():
+            return
+
+        with self.lock:
+            for job in ready:
+                if job['status'] == 'waiting':
+                    job.update(status='queued', retry_at=None)
+                    self.queue.put(job)
+
+        self.save()
+
+    def retry_pending_uploads(self):
+        """Files left on the pc because the nas was off go there when it comes back"""
+
+        config = nas.load_config()
+        if not nas.is_enabled(config):
+            return
+
+        with self.lock:
+            pending = [job for job in self.jobs if job['status'] == 'done' and job['warning'] and not job['upload_cancelled']
+                       and job['auto_uploads'] < MAX_AUTO_UPLOADS and job['output'] and os.path.isfile(job['output'])]
+
+        if not pending or not nas.is_reachable(config):
+            return
+
+        for job in pending:
             with self.lock:
-                job.update(output=output, remote=remote, warning=warning, status=status, error=error, upload_only=False)
+                job['auto_uploads'] += 1
+            console.print(f"[green]NAS is back, upload of [cyan]{job['name']}")
+            self.retry_upload(job['id'])
 
     def get_media(self, job):
         """Data used to name the file and to build the path on the nas"""
@@ -341,12 +536,17 @@ class DownloadManager:
         return media
 
     def download(self, job, progress):
-        domain = self.site.domain
         media = self.get_media(job)
         self.check_cancel(job)
 
         if job['source'] == 'anime':
             return self.download_anime(job, progress, media)
+
+        # The site is asked again at every attempt, it could have changed domain version meanwhile
+        if self.site.version is None:
+            self.site.connect()
+
+        domain = self.site.domain
 
         if job['type'] == 'movie':
             return film.main_dw_film(job['title_id'], job['slug'], domain, progress_callback=progress, media=media)
@@ -356,7 +556,7 @@ class DownloadManager:
         index = next((i for i, ep in enumerate(episodes) if ep['id'] == job['episode_id']), None)
 
         if index is None:
-            raise ValueError("Episodio non trovato")
+            raise DownloadError("Episodio non trovato sul sito", retry=False)
 
         token = tv.get_token(job['title_id'], domain)
         self.check_cancel(job)
@@ -370,7 +570,7 @@ class DownloadManager:
             episodes = anime.client.get_episodes(job['title_id'], 1, 1)
 
             if not episodes:
-                raise ValueError("Episodio non trovato")
+                raise DownloadError("Episodio non trovato sul sito", retry=False)
 
             episode_id, number = int(episodes[0]['id']), str(episodes[0]['number'])
 
@@ -383,25 +583,32 @@ class DownloadManager:
         self.check_cancel(job)
 
         with self.lock:
-            job.update(stage=stage, done=done, total=total)
+            # Waiting for the connection is shown without losing the progress
+            if stage in ('offline', 'online'):
+                job['waiting'] = 'offline' if stage == 'offline' else None
+            else:
+                job.update(stage=stage, done=done, total=total)
 
     def check_cancel(self, job):
         if job['cancel']:
-            raise DownloadCancelled()
+            raise DownloadCancelled(keep_files=job['cancel'] == 'shutdown')
 
     def stop(self, timeout=15):
-        """Cancel every download and wait for the running one to remove its files"""
+        """
+        The program is closing: the running download stops but keeps its segments,
+        the queue stays saved and goes on at the next start
+        """
 
         with self.lock:
             for job in self.jobs:
-                if job['status'] == 'queued':
-                    job['status'] = 'removed'
-                elif job['status'] == 'running':
-                    job['cancel'] = True
+                if job['status'] == 'running':
+                    job['cancel'] = 'shutdown'
 
         end = time.time() + timeout
         while time.time() < end and any(job['status'] == 'running' for job in self.list()):
             time.sleep(0.2)
+
+        self.save()
 
     def cancel(self, job_id):
         """Stop a running download, or take a waiting one out of the queue"""
@@ -409,16 +616,17 @@ class DownloadManager:
         with self.lock:
             job = next((job for job in self.jobs if job['id'] == job_id), None)
 
-            if job is None or job['status'] not in ('queued', 'running'):
+            if job is None or job['status'] not in ACTIVE:
                 return False
 
-            if job['status'] == 'queued':
+            if job['status'] in ('queued', 'waiting'):
                 # Worker skip removed jobs still in queue
                 job['status'] = 'removed'
                 self.jobs.remove(job)
             else:
                 job['cancel'] = True
 
+        self.save()
         return True
 
     def list(self):
@@ -427,40 +635,49 @@ class DownloadManager:
 
         # A failed upload can be retried, the file is still here
         enabled = nas.is_enabled()
+        now = time.time()
+
         for job in jobs:
             job['can_upload'] = bool(enabled and (job['warning'] or job['status'] == 'error')
                                      and job['output'] and os.path.isfile(job['output']))
+            job['retry_in'] = max(0, round(job['retry_at'] - now)) if job['status'] == 'waiting' and job['retry_at'] else None
+            job['cancel'] = bool(job['cancel'])
 
         return jobs
 
     def retry_upload(self, job_id):
         with self.lock:
-            job = next((job for job in self.jobs if job['id'] == job_id and job['output']
+            job = next((job for job in self.jobs if job['id'] == job_id and job['output'] and job['status'] in ('done', 'error')
                         and (job['warning'] or job['status'] == 'error')), None)
 
             if job is None:
                 return False
 
-            job.update(status='queued', stage=None, done=0, total=0, error=None, warning=None, upload_only=True, cancel=False)
+            job.update(status='queued', stage=None, done=0, total=0, error=None, warning=None, upload_only=True, cancel=False, upload_cancelled=False)
+            self.queue.put(job)
 
-        self.queue.put(job)
+        self.save()
         return True
 
     def remove(self, job_id):
         with self.lock:
-            for job in self.jobs:
-                if job['id'] == job_id and job['status'] != 'running':
+            job = next((job for job in self.jobs if job['id'] == job_id and job['status'] != 'running'), None)
 
-                    # Worker skip removed jobs still in queue
-                    job['status'] = 'removed'
-                    self.jobs.remove(job)
-                    return True
+            if job is None:
+                return False
 
-        return False
+            # Worker skip removed jobs still in queue
+            job['status'] = 'removed'
+            self.jobs.remove(job)
+
+        self.save()
+        return True
 
     def clear(self):
         with self.lock:
-            self.jobs = [job for job in self.jobs if job['status'] in ('queued', 'running')]
+            self.jobs = [job for job in self.jobs if job['status'] in ACTIVE]
+
+        self.save()
 
     def get_output(self, job_id):
         with self.lock:
@@ -494,7 +711,7 @@ class App:
             if self.last_request > closed_at:
                 return
 
-            if any(job['status'] in ('queued', 'running') for job in self.downloads.list()):
+            if any(job['status'] in ACTIVE for job in self.downloads.list()):
                 continue
 
             console.print("[red]GUI closed")
@@ -752,10 +969,22 @@ class Handler(BaseHTTPRequestHandler):
         except ApiError as e:
             self.send_json({'error': str(e)}, e.status)
 
+        except DownloadError as e:
+            self.send_json({'error': str(e)}, 502)
+
         # Download functions of the cli call sys.exit when something goes wrong
         except (Exception, SystemExit) as e:
             console.log(f"[red]GUI error on {url.path}: {e!r}")
-            self.send_json({'error': "Il sito non ha risposto come previsto, riprova tra poco"}, 502)
+            log_error(f"GUI error on {url.path}", e if isinstance(e, Exception) else None)
+
+            if is_network_error(e):
+                message = "Connessione a internet assente o instabile, riprova tra poco"
+            elif is_disk_full(e):
+                message = "Spazio su disco esaurito"
+            else:
+                message = "Il sito non ha risposto come previsto, riprova tra poco"
+
+            self.send_json({'error': message}, 502)
 
     def read_json(self):
 
@@ -860,11 +1089,43 @@ def open_window(url):
 
     webbrowser.open(url)
 
+def clean_temp():
+    """
+    Half built files are removed at the start. Segments stay, they are the downloads to resume,
+    only the ones not touched for days (downloads removed from the list) are deleted.
+    """
+
+    for folder in (os.path.join("tmp", "output"), os.path.join("tmp", "preview")):
+        remove_folder(folder)
+
+    segments = os.path.join("tmp", "segments")
+    if not os.path.isdir(segments):
+        return
+
+    limit = time.time() - SEGMENTS_MAX_AGE
+    for entry in os.scandir(segments):
+        try:
+            if entry.is_dir() and entry.stat().st_mtime < limit:
+                shutil.rmtree(entry.path, ignore_errors=True)
+        except OSError:
+            pass
+
 def main():
     parser = argparse.ArgumentParser(description="Graphic interface of StreamingCommunity downloader")
     parser.add_argument('--port', type=int, default=DEFAULT_PORT, help="port of the local server")
     parser.add_argument('--no-window', action='store_true', help="dont open the app window")
     args = parser.parse_args()
+
+    # Two programs open would download the same things together: the second one only shows the first
+    if not instance.acquire():
+        url = instance.get_running_url()
+        console.print(f"[yellow]SC Downloader is already open{f' => {url}' if url else ''}")
+
+        if url and not args.no_window:
+            open_window(url)
+        return
+
+    clean_temp()
 
     try:
         server = Server(('127.0.0.1', args.port), Handler)
@@ -874,6 +1135,7 @@ def main():
     server.app = App()
     server.app.server = server
     url = f"http://127.0.0.1:{server.server_port}"
+    instance.save_url(url)
     console.print(f"[green]GUI ready [white]=> [cyan]{url} [white](close the window to quit)")
 
     if not args.no_window:

@@ -11,8 +11,10 @@ from Src.Util import history
 from Src.Upload.update import main_update
 from Src.Lib.FFmpeg.installer import check_ffmpeg
 
+from Src.Util.errors import DownloadError, describe
+
 # Import
-import sys
+import os, sys
 
 # [ main ]
 def initialize():
@@ -21,7 +23,8 @@ def initialize():
         console.log("Install python version > 3.11")
         sys.exit(0)
 
-    remove_folder("tmp")
+    # Segments of the downloads to resume are kept, only half built files are removed
+    remove_folder(os.path.join("tmp", "output"))
     msg_start()
 
     try:
@@ -37,12 +40,18 @@ def download_title(selected_title, site_version, domain):
 
     media = {'name': selected_title['name'], 'year': selected_title.get('year'), 'type': selected_title['type']}
 
-    if selected_title['type'] == "movie":
-        console.print(f"[green]\nMovie select: {selected_title['name']}")
-        download_film(selected_title['id'], selected_title['slug'], domain, media=media)
-    else:
-        console.print(f"[green]\nTv select: {selected_title['name']}")
-        download_tv(selected_title['id'], selected_title['slug'], site_version, domain, media=media)
+    # A title that fails does not stop the others, what is saved is used by the next attempt
+    try:
+        if selected_title['type'] == "movie":
+            console.print(f"[green]\nMovie select: {selected_title['name']}")
+            download_film(selected_title['id'], selected_title['slug'], domain, media=media)
+        else:
+            console.print(f"[green]\nTv select: {selected_title['name']}")
+            download_tv(selected_title['id'], selected_title['slug'], site_version, domain, media=media)
+
+    except (DownloadError, OSError) as e:
+        console.print(f"[red]Download non riuscito: {describe(e)}")
+        return
 
     # Used by the recommendations of the gui
     history.add(selected_title['id'], selected_title['slug'], selected_title['name'], selected_title['type'], selected_title.get('year'))
@@ -90,6 +99,6 @@ if __name__ == '__main__':
     try:
         main()
     except KeyboardInterrupt:
-        # Segments and half files of the stopped download are removed
-        remove_folder("tmp")
+        # The stopped download removes its segments by itself, the ones of the gui to resume stay
+        remove_folder(os.path.join("tmp", "output"))
         console.print("\n[red]Download stopped, temporary files removed")

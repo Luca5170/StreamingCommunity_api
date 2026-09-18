@@ -3,8 +3,10 @@
 # Class import
 from Src.Util.headers import get_headers
 from Src.Util.console import console
+from Src.Util import http
 from Src.Lib.FFmpeg.my_m3u8 import download_m3u8
 from Src.Lib.Nas.nas import finalize
+from Src.Api import film
 from Src.Api.vixcloud import parse_content, get_playlist, get_master_playlist, get_m3u8_url, get_m3u8_audio, get_m3u8_key
 
 # General import
@@ -29,7 +31,7 @@ class AnimeUnity:
         session = requests.Session()
         session.headers.update({'user-agent': get_headers(), 'referer': f"{BASE_URL}/"})
 
-        response = session.get(BASE_URL, timeout=15)
+        response = http.get(BASE_URL, session=session, timeout=15)
         response.raise_for_status()
 
         session.headers['x-xsrf-token'] = unquote(session.cookies.get('XSRF-TOKEN', ''))
@@ -41,14 +43,14 @@ class AnimeUnity:
                 self.open()
             session = self.session
 
-        response = session.request(method, f"{BASE_URL}{path}", timeout=20, **kwargs)
+        response = http.request(method, f"{BASE_URL}{path}", session=session, **kwargs)
 
         # Laravel answers 419 when the token of the session is expired
         if response.status_code in (401, 419):
             with self.lock:
                 self.open()
                 session = self.session
-            response = session.request(method, f"{BASE_URL}{path}", timeout=20, **kwargs)
+            response = http.request(method, f"{BASE_URL}{path}", session=session, **kwargs)
 
         response.raise_for_status()
         return response
@@ -120,9 +122,7 @@ def get_title_name(anime):
 def get_player_script(embed_url):
     """Script of the vixcloud player with the parameters of the video"""
 
-    response = requests.get(embed_url, headers={'user-agent': get_headers()}, timeout=20)
-    response.raise_for_status()
-    return BeautifulSoup(response.text, "lxml").find("body").find("script").text
+    return film.get_player_script(embed_url)
 
 
 # [func \ main]

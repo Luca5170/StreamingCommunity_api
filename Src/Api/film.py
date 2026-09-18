@@ -3,6 +3,8 @@
 # Class import
 from Src.Util.headers import get_headers
 from Src.Util.console import console
+from Src.Util.errors import DownloadError
+from Src.Util import http
 from Src.Lib.FFmpeg.my_m3u8 import download_m3u8
 from Src.Lib.Nas.nas import finalize
 from Src.Api.page import get_base_url
@@ -14,23 +16,29 @@ from bs4 import BeautifulSoup
 
 # [func]
 def get_iframe(id_title, domain):
-    req = requests.get(url = f"{get_base_url(domain)}/iframe/{id_title}", headers = {
-        "User-agent": get_headers()
-    })
+    req = http.get(f"{get_base_url(domain)}/iframe/{id_title}", headers={"User-agent": get_headers()})
 
-    if req.ok:
-        url_embed = BeautifulSoup(req.text, "lxml").find("iframe").get("src")
-        req_embed = requests.get(url_embed, headers = {"User-agent": get_headers()}).text
+    if not req.ok:
+        # A title that is not on the site is not there also at the next attempt
+        raise DownloadError(f"Il sito ha risposto con errore {req.status_code}", retry=req.status_code not in (404, 410))
 
-        try:
-            return BeautifulSoup(req_embed, "lxml").find("body").find("script").text
-        except:
-            console.log("[red]Cant play this video, (video not available)")
-            sys.exit(0)
+    iframe = BeautifulSoup(req.text, "lxml").find("iframe")
+    if iframe is None or not iframe.get("src"):
+        raise DownloadError("Video non disponibile sul sito", retry=False)
 
-    else:
-        console.log(f"[red]Error: {req.status_code}")
-        sys.exit(0)
+    return get_player_script(iframe.get("src"))
+
+def get_player_script(url_embed):
+    """Script of the vixcloud player with the parameters of the video"""
+
+    req_embed = http.get(url_embed, headers={"User-agent": get_headers()})
+    body = BeautifulSoup(req_embed.text, "lxml").find("body")
+    script = body.find("script") if body else None
+
+    if not req_embed.ok or script is None:
+        raise DownloadError("Video non disponibile (il player non risponde)")
+
+    return script.text
     
 
 # [func \ main]
