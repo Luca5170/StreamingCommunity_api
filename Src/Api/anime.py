@@ -139,7 +139,9 @@ def dw_episode(anime_id, slug, episode_id, episode_number, progress_callback=Non
     if m3u8_url_audio != None:
         console.print("[blue]Use m3u8 audio => [red]True")
 
-    download_m3u8(m3u8_index=m3u8_url, m3u8_audio=m3u8_url_audio, m3u8_subtitle=m3u8_url, key=m3u8_key, output_filename=mp4_path, progress_callback=progress_callback)
+    # Animeunity burns the italian subtitles into the video, there is no subtitle track to look for
+    console.print("[blue]Subtitles => [green]already in the video")
+    download_m3u8(m3u8_index=m3u8_url, m3u8_audio=m3u8_url_audio, key=m3u8_key, output_filename=mp4_path, progress_callback=progress_callback)
 
     # Rename the file and move it to the nas if it is enabled
     return finalize(mp4_path, media, progress_callback)
