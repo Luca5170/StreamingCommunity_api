@@ -2206,8 +2206,7 @@ a {
   word-break: break-all;
 }
 
-/* Opened from the phone: settings and folders are on the pc */
-.remote-client [data-action="settings"],
+/* Opened from the phone: the folders are on the pc */
 .remote-client [data-action="open-folder"] {
   display: none;
 }

@@ -324,42 +324,18 @@ async function loadRemote() {
 }
 
 function renderRemote(info) {
-  $('#remote-enabled').checked = Boolean(info.enabled);
-  $('#remote-box').hidden = !(info.enabled && info.running);
+  $('#remote-box').hidden = !(info.running && info.addresses?.length);
   $('#remote-result').replaceChildren();
 
-  if (info.enabled && !info.url) {
+  if (!info.running) {
+    $('#remote-result').replaceChildren(h('div', { class: 'result bad' }, h('strong', {}, 'Accesso dalla rete non attivo: riavvia il programma')));
+  } else if (!info.addresses?.length) {
     $('#remote-result').replaceChildren(h('div', { class: 'result bad' }, h('strong', {}, 'Il PC non sembra collegato a una rete di casa')));
-    return;
   }
 
   // The svg is made by the program on this pc
   $('#remote-qr').innerHTML = info.qr || '';
   $('#remote-address').textContent = info.addresses?.[0] || '';
-}
-
-async function setRemote(enabled) {
-  const toggle = $('#remote-enabled');
-  toggle.disabled = true;
-
-  try {
-    renderRemote(await api('/api/remote', { method: 'POST', body: { enabled } }));
-    toast(enabled ? 'Accesso dal telefono attivo' : 'Accesso dal telefono disattivato', 'success');
-  } catch (error) {
-    toggle.checked = !enabled;
-    $('#remote-result').replaceChildren(h('div', { class: 'result bad' }, h('strong', {}, error.message)));
-  } finally {
-    toggle.disabled = false;
-  }
-}
-
-async function newRemoteKey() {
-  try {
-    renderRemote(await api('/api/remote/key', { method: 'POST', body: {} }));
-    toast('Telefoni scollegati: inquadra il nuovo codice per ricollegarli', 'success');
-  } catch (error) {
-    toast(error.message, 'error');
-  }
 }
 
 /* ---------- NAS ---------- */
@@ -1863,8 +1839,6 @@ function bindEvents() {
   $('#settings-form').addEventListener('submit', submitDomain);
   $('#nas-form').addEventListener('submit', saveNas);
   $('#nas-test').addEventListener('click', testNas);
-  $('#remote-enabled').addEventListener('change', (event) => setRemote(event.target.checked));
-  $('#remote-key').addEventListener('click', newRemoteKey);
   $$('.settings-tabs .tab').forEach((tab) => tab.addEventListener('click', () => showSettingsPanel(tab.dataset.panel)));
   $$('#category-switch .category').forEach((button) => button.addEventListener('click', () => setCategory(button.dataset.category)));
   $('#preview').addEventListener('layerclose', stopPreview);

@@ -44,7 +44,7 @@ Serie TV/Breaking Bad (2008)/Stagione 01/Breaking Bad - S01E03 - Conseguenze rad
 If the nas does not answer the download is never lost: the file stays in `videos` and the queue shows a button to upload it again. The password is saved in the credential manager of the system, address and folders in `nas.json`.
 
 ## Use it from the phone
-In the settings, tab Telefono, turn on the access from the home network and scan the QR code with the phone (same Wi-Fi, program open on the pc). The phone stays connected, next time open the address shown under the code. Without the key of the QR code nothing is visible, only private addresses are accepted and the settings can be changed only on the pc. "Scollega tutti i telefoni" makes a new key. The first time Windows asks to allow python on the network: choose private networks.
+While the program is open on the pc, every device of the same Wi-Fi can use it at `http://<address of the pc>:8770`: the address and a QR code to scan are in the settings, tab Telefono. Devices outside the home network are refused. The first time Windows asks to allow python on the network: choose private networks.
 
 ## Auto Update
 Keep your script up to date with the latest features by running:

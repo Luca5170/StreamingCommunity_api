@@ -4,59 +4,29 @@
 from Src.Util import storage
 
 # General import
-import hmac, ipaddress, secrets, socket
+import ipaddress, socket
 
 # Variable
 CONFIG_FILE = "remote.json"
 DEFAULT_PORT = 8770
-COOKIE_NAME = "sc_key"
-COOKIE_AGE = 365 * 24 * 3600
 
-# The phone can use the app, the settings of the pc stay on the pc
-LOCAL_ONLY = {
-    ('POST', '/api/domain'),
-    ('GET', '/api/nas'),
-    ('POST', '/api/nas'),
-    ('POST', '/api/nas/test'),
-    ('POST', '/api/open'),
-    ('POST', '/api/close'),
-    ('GET', '/api/remote'),
-    ('POST', '/api/remote'),
-    ('POST', '/api/remote/key'),
-}
+# Closing the page on the phone must not close the program on the pc
+LOCAL_ONLY = {('POST', '/api/close')}
 
 
 # [ config ]
 def load_config():
     saved = storage.read_json(CONFIG_FILE, {})
-    saved = saved if isinstance(saved, dict) else {}
-
-    config = {
-        'enabled': bool(saved.get('enabled')),
-        'key': saved.get('key') if isinstance(saved.get('key'), str) and len(saved.get('key')) >= 24 else None,
-        'port': saved.get('port') if isinstance(saved.get('port'), int) and 1024 < saved.get('port') < 65536 else DEFAULT_PORT,
-    }
-
-    # The key is made once, the phones that have it stay connected
-    if config['key'] is None:
-        config['key'] = new_key()
-        save_config(config)
-
-    return config
+    port = saved.get('port') if isinstance(saved, dict) else None
+    return {'port': port if isinstance(port, int) and 1024 < port < 65536 else DEFAULT_PORT}
 
 def save_config(config):
-    storage.write_json(CONFIG_FILE, {'enabled': config['enabled'], 'key': config['key'], 'port': config['port']}, indent=4)
-
-def new_key():
-    return secrets.token_urlsafe(24)
+    storage.write_json(CONFIG_FILE, {'port': config['port']}, indent=4)
 
 
 # [ access ]
-def is_valid_key(config, key):
-    return bool(key) and hmac.compare_digest(str(key).encode(), config['key'].encode())
-
 def is_home_network(address):
-    """Only devices of the home network: private addresses, never internet"""
+    """Every device of the home network can use the app, internet never"""
 
     try:
         ip = ipaddress.ip_address(address)
@@ -64,17 +34,6 @@ def is_home_network(address):
         return False
 
     return ip.is_private or ip.is_loopback or ip.is_link_local
-
-def get_cookie(header, name=COOKIE_NAME):
-    for part in (header or '').split(';'):
-        key, _, value = part.strip().partition('=')
-        if key == name:
-            return value
-
-    return None
-
-def make_cookie(key):
-    return f"{COOKIE_NAME}={key}; Path=/; Max-Age={COOKIE_AGE}; HttpOnly; SameSite=Strict"
 
 
 # [ address ]
@@ -107,7 +66,7 @@ def get_lan_ips():
     return ips
 
 def get_qr_svg(url):
-    """Qr code of the link, as svg to put in the page"""
+    """Qr code of the address, to open it from the phone without typing"""
 
     import segno
     return segno.make(url, error='m').svg_inline(scale=5, border=2, dark='#08090d', light='#ffffff')
