@@ -9,3 +9,4 @@ cryptography==3.4.8 # Problem with new version
 m3u8
 paramiko # Upload to nas
 keyring # Password of the nas in the credential manager
+segno # Qr code to open the app from the phone

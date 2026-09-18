@@ -30,3 +30,5 @@ sc_downloader.lock
 sc_downloader.instance.json
 *.bak
 *.tmp
+
+remote.json

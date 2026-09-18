@@ -132,6 +132,7 @@
       <div class="settings-tabs" role="tablist" aria-label="Impostazioni">
         <button class="tab" type="button" role="tab" data-panel="site" aria-selected="true">Sito</button>
         <button class="tab" type="button" role="tab" data-panel="nas" aria-selected="false">NAS</button>
+        <button class="tab" type="button" role="tab" data-panel="remote" aria-selected="false">Telefono</button>
       </div>
 
       <form class="settings-body" id="settings-form" novalidate>
@@ -181,6 +182,29 @@
           <button class="button primary" type="submit" id="nas-save">Salva</button>
         </div>
       </form>
+
+      <div class="settings-body" id="remote-panel" hidden>
+        <span class="settings-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18.5h2"/></svg>
+        </span>
+        <h2>Usa l’app dal telefono</h2>
+        <p class="settings-text">Con il PC acceso e l’app aperta, puoi cercare, vedere le anteprime e scaricare dal telefono collegato allo stesso Wi-Fi.</p>
+
+        <label class="switch">
+          <input type="checkbox" id="remote-enabled">
+          <span class="switch-track" aria-hidden="true"><span class="switch-dot"></span></span>
+          <span class="switch-label">Consenti l’accesso dalla rete di casa</span>
+        </label>
+
+        <div class="remote-box" id="remote-box" hidden>
+          <div class="remote-qr" id="remote-qr"></div>
+          <p class="remote-steps">Inquadra il codice con la fotocamera del telefono. Il telefono resta collegato: la prossima volta apri direttamente <code id="remote-address"></code></p>
+          <button class="button ghost small" type="button" id="remote-key">Scollega tutti i telefoni</button>
+        </div>
+
+        <p class="form-note">Solo chi inquadra il codice può entrare, e dal telefono non si possono cambiare le impostazioni. La prima volta Windows può chiedere se consentire l’accesso alla rete: scegli <strong>Reti private</strong>.</p>
+        <div id="remote-result"></div>
+      </div>
     </div>
   </div>
 

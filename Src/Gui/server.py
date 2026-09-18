@@ -4,7 +4,7 @@
 import Src.Api.page as Page
 from Src.Api import anime, film, tv
 from Src.Gui.anime_source import AnimeSource
-from Src.Gui import instance
+from Src.Gui import instance, remote
 from Src.Gui.recommend import Recommender
 from Src.Gui.anime_recommend import AnimeRecommender
 from Src.Lib.FFmpeg import preview
@@ -34,6 +34,7 @@ ACTIVE = ('queued', 'running', 'waiting')
 RETRY_DELAYS = (30, 120, 600)       # Seconds before the automatic attempts after an error
 NAS_RETRY_INTERVAL = 120            # How often the files the nas refused are tried again
 MAX_AUTO_UPLOADS = 5
+REMOTE_HOST = '0.0.0.0'             # Every network card of the pc, the key and the private addresses protect it
 SEGMENTS_MAX_AGE = 7 * 24 * 3600    # Segments of a download not resumed for a week are removed
 CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -694,6 +695,8 @@ class App:
         self.anime_recommender = AnimeRecommender()
         self.previews = {}
         self.preview_lock = threading.Lock()
+        self.remote_server = None
+        self.remote_lock = threading.Lock()
         self.server = None
         self.last_request = time.time()
 
@@ -720,6 +723,84 @@ class App:
 
     def status(self, query, body):
         return self.site.status()
+
+    # [ access from the phone ]
+    def start_remote(self):
+        """Open the app to the devices of the home network, on its own port and with the key"""
+
+        with self.remote_lock:
+            if self.remote_server is not None:
+                return
+
+            config = remote.load_config()
+            error = None
+
+            # The saved port could be taken by another program, the next free one is used
+            for port in [config['port']] + list(range(remote.DEFAULT_PORT, remote.DEFAULT_PORT + 20)):
+                try:
+                    server = Server((REMOTE_HOST, port), Handler)
+                    break
+                except OSError as e:
+                    error = e
+            else:
+                raise ApiError(f"Nessuna porta libera per l'accesso dal telefono ({error})", 500)
+
+            server.app = self
+            server.remote = True
+            self.remote_server = server
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+
+            if port != config['port']:
+                config['port'] = port
+                remote.save_config(config)
+
+            console.print(f"[green]Access from the home network [white]=> [cyan]port {port}")
+
+    def stop_remote(self):
+        with self.remote_lock:
+            server, self.remote_server = self.remote_server, None
+
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+
+    def remote_info(self):
+        config = remote.load_config()
+        port = self.remote_server.server_port if self.remote_server else config['port']
+        ips = remote.get_lan_ips()
+        urls = [f"http://{ip}:{port}/?key={config['key']}" for ip in ips]
+
+        return {
+            'enabled': config['enabled'],
+            'running': self.remote_server is not None,
+            'port': port,
+            'addresses': [f"http://{ip}:{port}" for ip in ips],
+            'url': urls[0] if urls else None,
+            'qr': remote.get_qr_svg(urls[0]) if urls else None,
+        }
+
+    def get_remote(self, query, body):
+        return self.remote_info()
+
+    def set_remote(self, query, body):
+        config = remote.load_config()
+        config['enabled'] = bool(body.get('enabled'))
+        remote.save_config(config)
+
+        if config['enabled']:
+            self.start_remote()
+        else:
+            self.stop_remote()
+
+        return self.remote_info()
+
+    def new_remote_key(self, query, body):
+        """A new key: the phones connected until now must scan the qr code again"""
+
+        config = remote.load_config()
+        config['key'] = remote.new_key()
+        remote.save_config(config)
+        return self.remote_info()
 
     def set_domain(self, query, body):
         self.site.connect(str(body.get('domain') or ''))
@@ -900,6 +981,9 @@ class App:
 
 ROUTES = {
     ('GET', '/api/status'): App.status,
+    ('GET', '/api/remote'): App.get_remote,
+    ('POST', '/api/remote'): App.set_remote,
+    ('POST', '/api/remote/key'): App.new_remote_key,
     ('POST', '/api/domain'): App.set_domain,
     ('GET', '/api/home'): App.home,
     ('GET', '/api/recommendations'): App.recommendations,
@@ -940,9 +1024,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_request(self, method):
         url = urlparse(self.path)
+        is_remote = getattr(self.server, 'remote', False)
+
+        if is_remote:
+            if not self.check_remote(method, url):
+                return
 
         # Accept only requests addressed to this server (dns rebinding)
-        if self.headers.get('Host') not in (f"127.0.0.1:{self.server.server_port}", f"localhost:{self.server.server_port}"):
+        elif self.headers.get('Host') not in (f"127.0.0.1:{self.server.server_port}", f"localhost:{self.server.server_port}"):
             return self.send_json({'error': "Host non valido"}, 403)
 
         if method == 'GET' and not url.path.startswith('/api/'):
@@ -964,7 +1053,13 @@ class Handler(BaseHTTPRequestHandler):
         try:
             body = self.read_json() if method == 'POST' else {}
             query = {key: values[0] for key, values in parse_qs(url.query).items()}
-            self.send_json(route(self.server.app, query, body))
+            result = route(self.server.app, query, body)
+
+            # The page on the phone hides what works only on the pc
+            if url.path == '/api/status':
+                result = {**result, 'remote_client': is_remote}
+
+            self.send_json(result)
 
         except ApiError as e:
             self.send_json({'error': str(e)}, e.status)
@@ -985,6 +1080,56 @@ class Handler(BaseHTTPRequestHandler):
                 message = "Il sito non ha risposto come previsto, riprova tra poco"
 
             self.send_json({'error': message}, 502)
+
+    def check_remote(self, method, url):
+        """
+        Requests from the home network: only private addresses, only with the key of the qr code.
+        The key arrives once in the link, then it stays in a cookie of the phone.
+        Return False when the request has already been answered.
+        """
+
+        if not remote.is_home_network(self.client_address[0]):
+            self.send_json({'error': "Accesso consentito solo dalla rete di casa"}, 403)
+            return False
+
+        config = remote.load_config()
+        if not config['enabled']:
+            self.send_json({'error': "Accesso dal telefono disattivato sul PC"}, 403)
+            return False
+
+        key = parse_qs(url.query).get('key', [None])[0]
+
+        # Link of the qr code: the key goes in the cookie and disappears from the address bar
+        if method == 'GET' and key is not None:
+            if not remote.is_valid_key(config, key):
+                self.send_access_page("Il codice non è più valido: inquadra di nuovo il QR code dalle impostazioni sul PC.")
+                return False
+
+            self.send_response(303)
+            self.send_header('Set-Cookie', remote.make_cookie(config['key']))
+            self.send_header('Location', '/')
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return False
+
+        if not remote.is_valid_key(config, remote.get_cookie(self.headers.get('Cookie'))):
+            if url.path.startswith('/api/'):
+                self.send_json({'error': "Accesso non autorizzato"}, 401)
+            else:
+                self.send_access_page("Per usare SC Downloader dal telefono inquadra il QR code in Impostazioni → Telefono sul PC.")
+            return False
+
+        if (method, url.path) in remote.LOCAL_ONLY:
+            self.send_json({'error': "Questa funzione è disponibile solo sul PC"}, 403)
+            return False
+
+        return True
+
+    def send_access_page(self, message):
+        page = f"""<!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SC Downloader</title></head><body style="margin:0;min-height:100vh;display:grid;place-items:center;background:#08090d;color:#f4f5f8;font:16px/1.5 system-ui,sans-serif">
+<main style="max-width:420px;padding:32px;text-align:center"><h1 style="font-size:22px">SC Downloader</h1><p style="color:#a3a8b8">{message}</p></main></body></html>"""
+        self.send_body(page.encode('utf-8'), 'text/html; charset=utf-8', 401)
 
     def read_json(self):
 
@@ -1136,6 +1281,13 @@ def main():
     server.app.server = server
     url = f"http://127.0.0.1:{server.server_port}"
     instance.save_url(url)
+
+    # Access from the phone, if it was on the last time
+    if remote.load_config()['enabled']:
+        try:
+            server.app.start_remote()
+        except Exception as e:
+            log_error("Access from the home network not started", e)
     console.print(f"[green]GUI ready [white]=> [cyan]{url} [white](close the window to quit)")
 
     if not args.no_window:
@@ -1147,4 +1299,5 @@ def main():
         console.print("[red]GUI closed")
     finally:
         server.server_close()
+        server.app.stop_remote()
         server.app.downloads.stop()

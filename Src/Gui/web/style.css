@@ -2168,6 +2168,50 @@ a {
   width: min(460px, 100%);
 }
 
+/* ---------- Phone ---------- */
+
+.remote-box {
+  display: grid;
+  justify-items: center;
+  gap: 14px;
+  margin: 20px 0 6px;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.03);
+  text-align: center;
+}
+
+.remote-qr {
+  width: min(220px, 100%);
+  overflow: hidden;
+  border-radius: 14px;
+  background: #fff;
+  line-height: 0;
+}
+
+.remote-qr svg {
+  width: 100%;
+  height: auto;
+}
+
+.remote-steps {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.remote-steps code {
+  color: var(--text);
+  word-break: break-all;
+}
+
+/* Opened from the phone: settings and folders are on the pc */
+.remote-client [data-action="settings"],
+.remote-client [data-action="open-folder"] {
+  display: none;
+}
+
 /* ---------- Preview ---------- */
 
 .sheet-video {

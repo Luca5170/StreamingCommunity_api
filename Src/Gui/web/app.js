@@ -278,6 +278,7 @@ function renderStatus() {
   chip.setAttribute('aria-label', chip.title);
 
   if (status?.site_name) $('#domain-prefix').textContent = `${status.site_name}.`;
+  document.body.classList.toggle('remote-client', Boolean(status?.remote_client));
 }
 
 function openSettings({ welcome = false, panel = 'site' } = {}) {
@@ -306,8 +307,59 @@ function showSettingsPanel(name) {
   $$('.settings-tabs .tab').forEach((tab) => tab.setAttribute('aria-selected', String(tab.dataset.panel === name)));
   $('#settings-form').hidden = name !== 'site';
   $('#nas-form').hidden = name !== 'nas';
+  $('#remote-panel').hidden = name !== 'remote';
 
   if (name === 'nas') loadNas();
+  if (name === 'remote') loadRemote();
+}
+
+/* ---------- Access from the phone ---------- */
+
+async function loadRemote() {
+  try {
+    renderRemote(await api('/api/remote'));
+  } catch (error) {
+    $('#remote-result').replaceChildren(h('div', { class: 'result bad' }, h('strong', {}, error.message)));
+  }
+}
+
+function renderRemote(info) {
+  $('#remote-enabled').checked = Boolean(info.enabled);
+  $('#remote-box').hidden = !(info.enabled && info.running);
+  $('#remote-result').replaceChildren();
+
+  if (info.enabled && !info.url) {
+    $('#remote-result').replaceChildren(h('div', { class: 'result bad' }, h('strong', {}, 'Il PC non sembra collegato a una rete di casa')));
+    return;
+  }
+
+  // The svg is made by the program on this pc
+  $('#remote-qr').innerHTML = info.qr || '';
+  $('#remote-address').textContent = info.addresses?.[0] || '';
+}
+
+async function setRemote(enabled) {
+  const toggle = $('#remote-enabled');
+  toggle.disabled = true;
+
+  try {
+    renderRemote(await api('/api/remote', { method: 'POST', body: { enabled } }));
+    toast(enabled ? 'Accesso dal telefono attivo' : 'Accesso dal telefono disattivato', 'success');
+  } catch (error) {
+    toggle.checked = !enabled;
+    $('#remote-result').replaceChildren(h('div', { class: 'result bad' }, h('strong', {}, error.message)));
+  } finally {
+    toggle.disabled = false;
+  }
+}
+
+async function newRemoteKey() {
+  try {
+    renderRemote(await api('/api/remote/key', { method: 'POST', body: {} }));
+    toast('Telefoni scollegati: inquadra il nuovo codice per ricollegarli', 'success');
+  } catch (error) {
+    toast(error.message, 'error');
+  }
 }
 
 /* ---------- NAS ---------- */
@@ -1749,6 +1801,12 @@ async function clearDownloads() {
 }
 
 async function openFolder(id) {
+  // On the phone the files are on the pc or on the nas
+  if (state.status?.remote_client) {
+    toast('Il file è sul PC: aprilo da lì o dal NAS', 'info');
+    return;
+  }
+
   try {
     await api('/api/open', { method: 'POST', body: id ? { id } : {} });
   } catch (error) {
@@ -1805,6 +1863,8 @@ function bindEvents() {
   $('#settings-form').addEventListener('submit', submitDomain);
   $('#nas-form').addEventListener('submit', saveNas);
   $('#nas-test').addEventListener('click', testNas);
+  $('#remote-enabled').addEventListener('change', (event) => setRemote(event.target.checked));
+  $('#remote-key').addEventListener('click', newRemoteKey);
   $$('.settings-tabs .tab').forEach((tab) => tab.addEventListener('click', () => showSettingsPanel(tab.dataset.panel)));
   $$('#category-switch .category').forEach((button) => button.addEventListener('click', () => setCategory(button.dataset.category)));
   $('#preview').addEventListener('layerclose', stopPreview);
@@ -1862,6 +1922,9 @@ function bindEvents() {
 
   // Closing the window stops the program, unless a download is running
   window.addEventListener('pagehide', () => {
+    // The phone closing its page does not close the program on the pc
+    if (state.status?.remote_client) return;
+
     try {
       fetch('/api/close', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', keepalive: true });
     } catch {
@@ -1883,7 +1946,7 @@ async function init() {
   const status = await loadStatus();
   loadHome();
 
-  if (!status.connected && state.category === 'sc') openSettings({ welcome: !status.domain });
+  if (!status.connected && state.category === 'sc' && !status.remote_client) openSettings({ welcome: !status.domain });
 
   if (status.ffmpeg === false) toast('FFmpeg non trovato: i download non funzioneranno finché non lo installi', 'error');
 }
