@@ -1,0 +1,712 @@
+# 15.09.26
+
+# Class import
+import Src.Api.page as Page
+from Src.Api import film, tv
+from Src.Lib.Nas import nas
+from Src.Util.cancel import DownloadCancelled
+from Src.Util.console import console
+from Src.Util.os import remove_folder
+
+# General import
+import argparse, itertools, json, os, queue, re, shutil, subprocess, sys, threading, time, webbrowser
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
+import requests
+
+# Variable
+WEB_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
+DATA_FILE = "data.json"
+VIDEOS_FOLDER = "videos"
+DEFAULT_PORT = 8765
+CONTENT_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+}
+
+
+class ApiError(Exception):
+    def __init__(self, message, status=400):
+        super().__init__(message)
+        self.status = status
+
+
+# [ site ]
+class Site:
+    """Domain and inertia version of the site, shared by every request"""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.domain = self.read_data().get('domain', '')
+        self.version = None
+
+    def read_data(self):
+        try:
+            with open(DATA_FILE, 'r') as file:
+                return json.load(file)
+        except (FileNotFoundError, ValueError):
+            return {}
+
+    def connect(self, domain=None):
+        """Get version of the site and save the domain if it works"""
+
+        domain = (self.domain if domain is None else domain).strip().strip('.')
+
+        if not domain:
+            raise ApiError("Inserisci l'estensione del sito")
+
+        try:
+            version = Page.get_version(domain)
+        except Exception:
+            raise ApiError(f"Impossibile raggiungere {Page.SITE_NAME}.{domain}", 502)
+
+        with self.lock:
+            self.domain, self.version = domain, version
+
+        data = self.read_data()
+        data['domain'] = domain
+        with open(DATA_FILE, 'w') as file:
+            json.dump(data, file)
+
+    def status(self):
+        error = None
+
+        if self.domain and self.version is None:
+            try:
+                self.connect()
+            except ApiError as e:
+                error = str(e)
+
+        return {
+            'domain': self.domain,
+            'site_name': Page.SITE_NAME,
+            'site': f"{Page.SITE_NAME}.{self.domain}" if self.domain else None,
+            'connected': self.version is not None,
+            'ffmpeg': shutil.which('ffmpeg') is not None,
+            'nas': nas.is_enabled(),
+            'error': error,
+        }
+
+    def request(self, fetch):
+        """Call fetch(domain, version), getting the new version if the site has been updated"""
+
+        if self.version is None:
+            self.connect()
+
+        try:
+            return fetch(self.domain, self.version)
+        except requests.HTTPError as e:
+
+            # Inertia answer 409 when the version of the site is changed
+            if e.response is None or e.response.status_code != 409:
+                raise
+
+            self.connect()
+            return fetch(self.domain, self.version)
+
+
+# [ format ]
+def get_image(cdn_url, images, *types):
+    for image_type in types:
+        for image in images or []:
+            if image.get('type') == image_type and image.get('filename'):
+                return f"{cdn_url}/images/{image['filename']}"
+
+    return None
+
+def format_title(title, cdn_url):
+    images = title.get('images')
+    date = title.get('release_date') or title.get('last_air_date') or ''
+
+    return {
+        'id': title['id'],
+        'slug': title['slug'],
+        'name': title['name'],
+        'type': title['type'],
+        'score': title.get('score'),
+        'year': date[:4] or None,
+        'age': title.get('age'),
+        'seasons_count': title.get('seasons_count'),
+        'sub_ita': bool(title.get('sub_ita')),
+        'poster': get_image(cdn_url, images, 'poster', 'cover_mobile'),
+        'backdrop': get_image(cdn_url, images, 'background', 'cover'),
+        'logo': get_image(cdn_url, images, 'logo'),
+    }
+
+def format_detail(props):
+    title = props['title']
+    detail = format_title(title, props['cdn_url'])
+
+    detail.update({
+        'plot': title.get('plot'),
+        'original_name': title.get('original_name'),
+        'runtime': title.get('runtime'),
+        'quality': title.get('quality'),
+        'genres': [genre['name'] for genre in title.get('genres') or []],
+        'actors': [actor['name'] for actor in title.get('main_actors') or []][:6],
+        'directors': [director['name'] for director in title.get('main_directors') or []][:3],
+        'seasons': [season['number'] for season in title.get('seasons') or []],
+    })
+    return detail
+
+def format_episode(episode, cdn_url):
+    return {
+        'id': episode['id'],
+        'number': episode['number'],
+        'name': episode.get('name') or f"Episodio {episode['number']}",
+        'plot': episode.get('plot'),
+        'duration': episode.get('duration'),
+        'cover': get_image(cdn_url, episode.get('images'), 'cover'),
+    }
+
+def parse_int(value, name):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ApiError(f"Parametro non valido: {name}")
+
+def read_nas(body):
+    """Nas settings sent by the gui, the password is kept apart"""
+
+    return {
+        'enabled': bool(body.get('enabled')),
+        'host': str(body.get('host') or '').strip(),
+        'port': parse_int(body.get('port') or 22, 'port'),
+        'user': str(body.get('user') or '').strip(),
+        'film_path': str(body.get('film_path') or '').strip().rstrip('/'),
+        'tv_path': str(body.get('tv_path') or '').strip().rstrip('/'),
+    }
+
+def parse_slug(value):
+
+    # Slug is used in urls and file names
+    if not isinstance(value, str) or not re.fullmatch(r"[\w+-]+", value):
+        raise ApiError("Parametro non valido: slug")
+
+    return value
+
+def open_in_explorer(path):
+    path = os.path.abspath(path)
+
+    if sys.platform == 'win32':
+        if os.path.isfile(path):
+            subprocess.Popen(f'explorer /select,"{path}"')
+        else:
+            os.startfile(path)
+    elif sys.platform == 'darwin':
+        subprocess.Popen(['open', '-R', path] if os.path.isfile(path) else ['open', path])
+    else:
+        subprocess.Popen(['xdg-open', os.path.dirname(path) if os.path.isfile(path) else path])
+
+
+# [ downloads ]
+class DownloadManager:
+    """Queue of downloads, executed one at a time because they share tmp folder"""
+
+    def __init__(self, site):
+        self.site = site
+        self.jobs = []
+        self.lock = threading.Lock()
+        self.queue = queue.Queue()
+        self.next_id = itertools.count(1)
+        threading.Thread(target=self.worker, daemon=True).start()
+
+    def make_job(self, item):
+        if not isinstance(item, dict):
+            raise ApiError("Elemento da scaricare non valido")
+
+        job = {
+            'id': None,
+            'title_id': parse_int(item.get('id'), 'id'),
+            'slug': parse_slug(item.get('slug')),
+            'name': str(item.get('name') or item.get('slug')),
+            'type': 'tv' if item.get('type') == 'tv' else 'movie',
+            'year': str(item.get('year'))[:4] if item.get('year') else None,
+            'poster': item.get('poster') if isinstance(item.get('poster'), str) else None,
+            'season': None,
+            'episode_id': None,
+            'episode_number': None,
+            'episode_name': None,
+            'status': 'queued',
+            'stage': None,
+            'done': 0,
+            'total': 0,
+            'error': None,
+            'warning': None,
+            'output': None,
+            'remote': None,
+            'upload_only': False,
+            'cancel': False,
+        }
+
+        if job['type'] == 'tv':
+            job['season'] = parse_int(item.get('season'), 'season')
+            job['episode_id'] = parse_int(item.get('episode_id'), 'episode_id')
+            job['episode_number'] = parse_int(item.get('episode_number'), 'episode_number')
+            job['episode_name'] = str(item.get('episode_name') or '')
+
+        return job
+
+    def add(self, items):
+        jobs = [self.make_job(item) for item in items]
+        added = []
+
+        with self.lock:
+            for job in jobs:
+                duplicate = next((other for other in self.jobs if other['status'] in ('queued', 'running')
+                                  and (other['title_id'], other['episode_id']) == (job['title_id'], job['episode_id'])), None)
+
+                if duplicate is None:
+                    job['id'] = next(self.next_id)
+                    self.jobs.append(job)
+                    self.queue.put(job)
+                    added.append(job)
+
+        return [dict(job) for job in added]
+
+    def worker(self):
+        while True:
+            job = self.queue.get()
+
+            with self.lock:
+                if job['status'] != 'queued':
+                    continue
+                job['status'] = 'running'
+
+            console.print(f"\n[green]GUI download [white]=> [cyan]{job['name']}")
+            progress = lambda stage, done, total: self.update(job, stage, done, total)
+            output, remote, warning, status, error = None, None, None, 'done', None
+
+            try:
+                if job['upload_only']:
+                    result = nas.finalize(job['output'], self.get_media(job), progress)
+
+                else:
+                    # Segments of a download that failed must not end up in the next one
+                    remove_folder("tmp")
+                    result = self.download(job, progress)
+
+                # A nas that does not answer leaves the file here, with a warning
+                output, remote, warning = result['path'], result['remote'], result['warning']
+
+            except DownloadCancelled:
+                # Nothing of a cancelled download is kept
+                remove_folder("tmp")
+                status = 'cancelled'
+                console.print(f"[yellow]GUI download cancelled [white]=> [cyan]{job['name']}")
+
+            except SystemExit:
+                status, error = 'error', "Download non riuscito, dettagli nella console"
+            except Exception as e:
+                status, error = 'error', str(e) or type(e).__name__
+
+            with self.lock:
+                job.update(output=output, remote=remote, warning=warning, status=status, error=error, upload_only=False)
+
+    def get_media(self, job):
+        """Data used to name the file and to build the path on the nas"""
+
+        media = {'name': job['name'], 'year': job['year'], 'type': job['type']}
+
+        if job['type'] == 'tv':
+            media.update(season=job['season'], episode_number=job['episode_number'], episode_name=job['episode_name'])
+
+        return media
+
+    def download(self, job, progress):
+        domain = self.site.domain
+        media = self.get_media(job)
+        self.check_cancel(job)
+
+        if job['type'] == 'movie':
+            return film.main_dw_film(job['title_id'], job['slug'], domain, progress_callback=progress, media=media)
+
+        props = self.site.request(lambda domain, version: tv.get_season(job['title_id'], job['slug'], domain, version, job['season']))
+        episodes = [{'id': ep['id'], 'n': ep['number'], 'name': ep['name']} for ep in props['loadedSeason']['episodes']]
+        index = next((i for i, ep in enumerate(episodes) if ep['id'] == job['episode_id']), None)
+
+        if index is None:
+            raise ValueError("Episodio non trovato")
+
+        token = tv.get_token(job['title_id'], domain)
+        self.check_cancel(job)
+        return tv.dw_single_ep(job['title_id'], episodes, index, domain, token, job['slug'], job['season'], progress_callback=progress, media=media)
+
+    def update(self, job, stage, done, total):
+        """Progress of a job, it stops the download when the user cancels it"""
+
+        self.check_cancel(job)
+
+        with self.lock:
+            job.update(stage=stage, done=done, total=total)
+
+    def check_cancel(self, job):
+        if job['cancel']:
+            raise DownloadCancelled()
+
+    def stop(self, timeout=15):
+        """Cancel every download and wait for the running one to remove its files"""
+
+        with self.lock:
+            for job in self.jobs:
+                if job['status'] == 'queued':
+                    job['status'] = 'removed'
+                elif job['status'] == 'running':
+                    job['cancel'] = True
+
+        end = time.time() + timeout
+        while time.time() < end and any(job['status'] == 'running' for job in self.list()):
+            time.sleep(0.2)
+
+    def cancel(self, job_id):
+        """Stop a running download, or take a waiting one out of the queue"""
+
+        with self.lock:
+            job = next((job for job in self.jobs if job['id'] == job_id), None)
+
+            if job is None or job['status'] not in ('queued', 'running'):
+                return False
+
+            if job['status'] == 'queued':
+                # Worker skip removed jobs still in queue
+                job['status'] = 'removed'
+                self.jobs.remove(job)
+            else:
+                job['cancel'] = True
+
+        return True
+
+    def list(self):
+        with self.lock:
+            jobs = [dict(job) for job in self.jobs]
+
+        # A failed upload can be retried, the file is still here
+        enabled = nas.is_enabled()
+        for job in jobs:
+            job['can_upload'] = bool(enabled and (job['warning'] or job['status'] == 'error')
+                                     and job['output'] and os.path.isfile(job['output']))
+
+        return jobs
+
+    def retry_upload(self, job_id):
+        with self.lock:
+            job = next((job for job in self.jobs if job['id'] == job_id and job['output']
+                        and (job['warning'] or job['status'] == 'error')), None)
+
+            if job is None:
+                return False
+
+            job.update(status='queued', stage=None, done=0, total=0, error=None, warning=None, upload_only=True, cancel=False)
+
+        self.queue.put(job)
+        return True
+
+    def remove(self, job_id):
+        with self.lock:
+            for job in self.jobs:
+                if job['id'] == job_id and job['status'] != 'running':
+
+                    # Worker skip removed jobs still in queue
+                    job['status'] = 'removed'
+                    self.jobs.remove(job)
+                    return True
+
+        return False
+
+    def clear(self):
+        with self.lock:
+            self.jobs = [job for job in self.jobs if job['status'] in ('queued', 'running')]
+
+    def get_output(self, job_id):
+        with self.lock:
+            return next((job['output'] for job in self.jobs if job['id'] == job_id), None)
+
+
+# [ api ]
+class App:
+    def __init__(self):
+        self.site = Site()
+        self.downloads = DownloadManager(self.site)
+        self.server = None
+        self.last_request = time.time()
+
+    def close(self, query, body):
+        """The window has been closed, stop the program when no download is running"""
+
+        threading.Thread(target=self.close_when_idle, args=(self.last_request,), daemon=True).start()
+        return {'ok': True}
+
+    def close_when_idle(self, closed_at):
+        while True:
+            time.sleep(4)
+
+            # The page is open again, keep working
+            if self.last_request > closed_at:
+                return
+
+            if any(job['status'] in ('queued', 'running') for job in self.downloads.list()):
+                continue
+
+            console.print("[red]GUI closed")
+            threading.Thread(target=self.server.shutdown, daemon=True).start()
+            return
+
+    def status(self, query, body):
+        return self.site.status()
+
+    def set_domain(self, query, body):
+        self.site.connect(str(body.get('domain') or ''))
+        return self.site.status()
+
+    def home(self, query, body):
+        props = self.site.request(Page.get_home)
+
+        return {'sliders': [{
+            'name': slider['name'],
+            'label': slider['label'],
+            'titles': [format_title(title, props['cdn_url']) for title in slider['titles']],
+        } for slider in props.get('sliders') or []]}
+
+    def search(self, query, body):
+        text = query.get('q', '').strip()
+
+        if not text:
+            raise ApiError("Scrivi il titolo da cercare")
+
+        props = self.site.request(lambda domain, version: Page.get_search(text, domain, version))
+        return {'results': [format_title(title, props['cdn_url']) for title in props['titles']]}
+
+    def title(self, query, body):
+        title_id, slug = parse_int(query.get('id'), 'id'), parse_slug(query.get('slug'))
+        return format_detail(self.site.request(lambda domain, version: Page.get_title(title_id, slug, domain, version)))
+
+    def season(self, query, body):
+        title_id, slug, number = parse_int(query.get('id'), 'id'), parse_slug(query.get('slug')), parse_int(query.get('number'), 'number')
+        props = self.site.request(lambda domain, version: tv.get_season(title_id, slug, domain, version, number))
+
+        return {
+            'number': number,
+            'episodes': [format_episode(episode, props['cdn_url']) for episode in props['loadedSeason']['episodes']],
+        }
+
+    def list_downloads(self, query, body):
+        return {'jobs': self.downloads.list()}
+
+    def add_downloads(self, query, body):
+        items = body.get('items')
+
+        if not isinstance(items, list) or not items:
+            raise ApiError("Nessun elemento da scaricare")
+
+        return {'added': self.downloads.add(items), 'jobs': self.downloads.list()}
+
+    def remove_download(self, query, body):
+        if not self.downloads.remove(parse_int(body.get('id'), 'id')):
+            raise ApiError("Questo download non può essere rimosso")
+
+        return {'jobs': self.downloads.list()}
+
+    def clear_downloads(self, query, body):
+        self.downloads.clear()
+        return {'jobs': self.downloads.list()}
+
+    def cancel_download(self, query, body):
+        if not self.downloads.cancel(parse_int(body.get('id'), 'id')):
+            raise ApiError("Questo download non è più in corso")
+
+        return {'jobs': self.downloads.list()}
+
+    def upload_download(self, query, body):
+        if not self.downloads.retry_upload(parse_int(body.get('id'), 'id')):
+            raise ApiError("Questo file non può essere caricato di nuovo")
+
+        return {'jobs': self.downloads.list()}
+
+    def nas_config(self, query, body):
+        return self.nas_status(nas.load_config())
+
+    def save_nas(self, query, body):
+        config = nas.save_config(read_nas(body))
+
+        if body.get('password'):
+            nas.save_password(config, str(body['password']))
+
+        return self.nas_status(config)
+
+    def test_nas(self, query, body):
+        config = read_nas(body)
+
+        try:
+            return {'ok': True, **nas.test_connection(config, str(body.get('password') or '') or None)}
+        except nas.NasError as e:
+            return {'ok': False, 'error': str(e)}
+
+    def nas_status(self, config):
+        return {**config, 'password_saved': bool(nas.get_password(config))}
+
+    def open_folder(self, query, body):
+        output = self.downloads.get_output(parse_int(body['id'], 'id')) if body.get('id') is not None else None
+        os.makedirs(VIDEOS_FOLDER, exist_ok=True)
+        open_in_explorer(output if output and os.path.isfile(output) else VIDEOS_FOLDER)
+        return {'ok': True}
+
+
+ROUTES = {
+    ('GET', '/api/status'): App.status,
+    ('POST', '/api/domain'): App.set_domain,
+    ('GET', '/api/home'): App.home,
+    ('GET', '/api/search'): App.search,
+    ('GET', '/api/title'): App.title,
+    ('GET', '/api/season'): App.season,
+    ('GET', '/api/downloads'): App.list_downloads,
+    ('POST', '/api/downloads'): App.add_downloads,
+    ('POST', '/api/downloads/remove'): App.remove_download,
+    ('POST', '/api/downloads/clear'): App.clear_downloads,
+    ('POST', '/api/downloads/upload'): App.upload_download,
+    ('POST', '/api/downloads/cancel'): App.cancel_download,
+    ('GET', '/api/nas'): App.nas_config,
+    ('POST', '/api/nas'): App.save_nas,
+    ('POST', '/api/nas/test'): App.test_nas,
+    ('POST', '/api/open'): App.open_folder,
+    ('POST', '/api/close'): App.close,
+}
+
+
+# [ server ]
+class Handler(BaseHTTPRequestHandler):
+
+    def log_message(self, format, *args):
+        pass    # Console is used by download logs
+
+    def do_GET(self):
+        self.handle_request('GET')
+
+    def do_POST(self):
+        self.handle_request('POST')
+
+    def handle_request(self, method):
+        url = urlparse(self.path)
+
+        # Accept only requests addressed to this server (dns rebinding)
+        if self.headers.get('Host') not in (f"127.0.0.1:{self.server.server_port}", f"localhost:{self.server.server_port}"):
+            return self.send_json({'error': "Host non valido"}, 403)
+
+        if method == 'GET' and not url.path.startswith('/api/'):
+            return self.send_static(url.path)
+
+        route = ROUTES.get((method, url.path))
+        if route is None:
+            return self.send_json({'error': "Risorsa non trovata"}, 404)
+
+        # Used to know if the window is still open
+        if url.path != '/api/close':
+            self.server.app.last_request = time.time()
+
+        try:
+            body = self.read_json() if method == 'POST' else {}
+            query = {key: values[0] for key, values in parse_qs(url.query).items()}
+            self.send_json(route(self.server.app, query, body))
+
+        except ApiError as e:
+            self.send_json({'error': str(e)}, e.status)
+
+        # Download functions of the cli call sys.exit when something goes wrong
+        except (Exception, SystemExit) as e:
+            console.log(f"[red]GUI error on {url.path}: {e!r}")
+            self.send_json({'error': "Il sito non ha risposto come previsto, riprova tra poco"}, 502)
+
+    def read_json(self):
+
+        # Json content type needs a cors preflight, so other web pages cant post here
+        if self.headers.get('Content-Type', '').split(';')[0].strip() != 'application/json':
+            raise ApiError("Content-Type non valido", 415)
+
+        try:
+            body = json.loads(self.rfile.read(int(self.headers.get('Content-Length') or 0)) or b'{}')
+        except ValueError:
+            raise ApiError("JSON non valido")
+
+        if not isinstance(body, dict):
+            raise ApiError("JSON non valido")
+
+        return body
+
+    def send_static(self, path):
+        file_path = os.path.normpath(os.path.join(WEB_FOLDER, path.lstrip('/') or 'index.html'))
+        extension = os.path.splitext(file_path)[1]
+
+        if not file_path.startswith(WEB_FOLDER + os.sep) or extension not in CONTENT_TYPES or not os.path.isfile(file_path):
+            return self.send_json({'error': "Risorsa non trovata"}, 404)
+
+        with open(file_path, 'rb') as file:
+            self.send_body(file.read(), CONTENT_TYPES[extension])
+
+    def send_json(self, data, status=200):
+        self.send_body(json.dumps(data).encode('utf-8'), 'application/json; charset=utf-8', status)
+
+    def send_body(self, body, content_type, status=200):
+        self.send_response(status)
+        self.send_header('Content-Type', content_type)
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'no-store')
+        self.end_headers()
+        self.wfile.write(body)
+
+class Server(ThreadingHTTPServer):
+    daemon_threads = True
+
+    # On windows reuse address let two servers bind the same port
+    allow_reuse_address = sys.platform != 'win32'
+
+    def handle_error(self, request, client_address):
+
+        # Browser closing a connection is not an error
+        if not isinstance(sys.exc_info()[1], ConnectionError):
+            super().handle_error(request, client_address)
+
+def open_window(url):
+    """Open the gui in a browser window without address bar if possible"""
+
+    browsers = [
+        os.path.join(os.environ.get('ProgramFiles(x86)', ''), 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+        os.path.join(os.environ.get('ProgramFiles', ''), 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+        os.path.join(os.environ.get('ProgramFiles', ''), 'Google', 'Chrome', 'Application', 'chrome.exe'),
+        os.path.join(os.environ.get('LOCALAPPDATA', ''), 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    ]
+
+    for browser in browsers:
+        if os.path.isfile(browser):
+            subprocess.Popen([browser, f"--app={url}", "--window-size=1360,880"])
+            return
+
+    webbrowser.open(url)
+
+def main():
+    parser = argparse.ArgumentParser(description="Graphic interface of StreamingCommunity downloader")
+    parser.add_argument('--port', type=int, default=DEFAULT_PORT, help="port of the local server")
+    parser.add_argument('--no-window', action='store_true', help="dont open the app window")
+    args = parser.parse_args()
+
+    try:
+        server = Server(('127.0.0.1', args.port), Handler)
+    except OSError:
+        server = Server(('127.0.0.1', 0), Handler)
+
+    server.app = App()
+    server.app.server = server
+    url = f"http://127.0.0.1:{server.server_port}"
+    console.print(f"[green]GUI ready [white]=> [cyan]{url} [white](close the window to quit)")
+
+    if not args.no_window:
+        open_window(url)
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        console.print("[red]GUI closed")
+    finally:
+        server.server_close()
+        server.app.downloads.stop()

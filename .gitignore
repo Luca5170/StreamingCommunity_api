@@ -1,0 +1,23 @@
+
+# Folder
+bin
+lib64
+*__pycache__
+pyvenv.cfg
+venv/
+
+# Editor and tools of this pc
+.idea/
+.claude/
+
+# Copy of the upstream project, used only as reference
+VibraVid-*/
+
+# Project specific
+videos/
+tmp/
+debug.log
+
+# Nas settings of this pc
+nas.json
+nas_known_hosts

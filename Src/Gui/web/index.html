@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#08090d">
+  <title>SC Downloader</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%23ffc462'/%3E%3Cstop offset='1' stop-color='%23ff7a3d'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='16' fill='url(%23g)'/%3E%3Cpath d='M26 19.5v25L46 32z' fill='%231d1305'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar" id="topbar">
+    <a class="brand" href="#" data-action="home" aria-label="SC Downloader, torna alla home">
+      <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M9 6.2v11.6l9.2-5.8z"/></svg></span>
+      <span class="brand-name">SC <span>Downloader</span></span>
+    </a>
+
+    <form class="search" id="search-form" role="search" autocomplete="off">
+      <svg class="search-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      <input id="search-input" type="search" placeholder="Cerca film e serie TV" aria-label="Cerca film e serie TV" spellcheck="false" enterkeyhint="search">
+      <kbd class="search-hint" aria-hidden="true">/</kbd>
+      <button class="search-clear" id="search-clear" type="button" aria-label="Cancella ricerca" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7 7 17"/></svg>
+      </button>
+    </form>
+
+    <div class="topbar-actions">
+      <button class="status-chip" id="status-chip" type="button" data-action="settings">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span class="status-label">Connessione…</span>
+      </button>
+      <button class="icon-button downloads-button" id="downloads-button" type="button" data-action="downloads" aria-label="Download">
+        <svg class="ring" viewBox="0 0 40 40" aria-hidden="true"><circle class="ring-track" cx="20" cy="20" r="18"/><circle class="ring-value" id="ring-value" cx="20" cy="20" r="18"/></svg>
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4.5v10m0 0-4-4m4 4 4-4M5.5 19h13"/></svg>
+        <span class="badge" id="downloads-badge" hidden>0</span>
+      </button>
+      <button class="icon-button" type="button" data-action="settings" aria-label="Impostazioni">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/><path d="M19.4 13.5a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5v.2a2 2 0 1 1-4 0v-.1a1.6 1.6 0 0 0-1-1.5 1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1h-.2a2 2 0 1 1 0-4h.1a1.6 1.6 0 0 0 1.5-1 1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3h.1a1.6 1.6 0 0 0 1-1.5v-.2a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8v.1a1.6 1.6 0 0 0 1.5 1h.2a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main>
+    <section class="view" id="home-view">
+      <div class="hero" id="hero">
+        <div class="hero-media" id="hero-media"></div>
+        <div class="hero-shade" aria-hidden="true"></div>
+        <div class="hero-content" id="hero-content"></div>
+        <div class="hero-dots" id="hero-dots"></div>
+      </div>
+      <div class="rows" id="rows"></div>
+    </section>
+
+    <section class="view search-view" id="search-view" hidden>
+      <header class="view-head">
+        <p class="eyebrow">Risultati della ricerca</p>
+        <h1 id="search-title"></h1>
+        <p class="view-sub" id="search-count"></p>
+      </header>
+      <div class="grid" id="results"></div>
+    </section>
+  </main>
+
+  <div class="layer modal" id="detail" hidden>
+    <div class="scrim" data-close></div>
+    <article class="sheet" role="dialog" aria-modal="true" aria-label="Dettagli del titolo">
+      <div class="sheet-bar">
+        <button class="icon-button close-button" type="button" data-close aria-label="Chiudi">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></svg>
+        </button>
+      </div>
+      <div id="detail-content"></div>
+    </article>
+  </div>
+
+  <div class="layer drawer" id="downloads" hidden>
+    <div class="scrim" data-close></div>
+    <aside class="drawer-panel" role="dialog" aria-modal="true" aria-labelledby="downloads-title">
+      <header class="drawer-head">
+        <div>
+          <h2 id="downloads-title">Download</h2>
+          <p class="drawer-sub" id="downloads-summary">Nessun download</p>
+        </div>
+        <button class="icon-button" type="button" data-close aria-label="Chiudi">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></svg>
+        </button>
+      </header>
+      <div class="drawer-tools">
+        <button class="button ghost small" type="button" data-action="open-folder">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></svg>
+          Apri cartella
+        </button>
+        <button class="button ghost small" type="button" data-action="clear-downloads">Pulisci completati</button>
+      </div>
+      <div class="jobs" id="jobs"></div>
+    </aside>
+  </div>
+
+  <div class="layer modal" id="settings" hidden>
+    <div class="scrim" data-close></div>
+    <div class="sheet sheet-small" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+      <div class="sheet-bar">
+        <button class="icon-button close-button" type="button" data-close aria-label="Chiudi">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></svg>
+        </button>
+      </div>
+
+      <div class="settings-tabs" role="tablist" aria-label="Impostazioni">
+        <button class="tab" type="button" role="tab" data-panel="site" aria-selected="true">Sito</button>
+        <button class="tab" type="button" role="tab" data-panel="nas" aria-selected="false">NAS</button>
+      </div>
+
+      <form class="settings-body" id="settings-form" novalidate>
+        <span class="settings-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.4 2.5 3.7 5.5 3.7 9s-1.3 6.5-3.7 9c-2.4-2.5-3.7-5.5-3.7-9S9.6 5.5 12 3z"/></svg>
+        </span>
+        <h2 id="settings-title">Connessione al sito</h2>
+        <p class="settings-text" id="settings-text"></p>
+        <label class="domain-field">
+          <span class="domain-prefix" id="domain-prefix">streamingcommunityz.</span>
+          <input id="domain-input" type="text" placeholder="academy" spellcheck="false" autocomplete="off" aria-label="Estensione del dominio">
+        </label>
+        <p class="form-error" id="settings-error" role="alert" hidden></p>
+        <button class="button primary wide" id="settings-submit" type="submit">Connetti</button>
+      </form>
+
+      <form class="settings-body" id="nas-form" novalidate hidden>
+        <span class="settings-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="6" rx="2"/><rect x="3.5" y="13.5" width="17" height="6" rx="2"/><path d="M7 7.5v.01M7 16.5v.01"/></svg>
+        </span>
+        <h2>Caricamento sul NAS</h2>
+        <p class="settings-text">A fine download il file viene spostato sul NAS via SFTP e rinominato come vogliono i media server.</p>
+
+        <label class="switch">
+          <input type="checkbox" id="nas-enabled">
+          <span class="switch-track" aria-hidden="true"><span class="switch-dot"></span></span>
+          <span class="switch-label">Carica i download sul NAS</span>
+        </label>
+
+        <div class="fields">
+          <div class="field-row">
+            <label class="field grow"><span>Indirizzo</span><input id="nas-host" type="text" placeholder="192.168.1.100" spellcheck="false" autocomplete="off"></label>
+            <label class="field port"><span>Porta</span><input id="nas-port" type="number" min="1" max="65535" placeholder="22" autocomplete="off"></label>
+          </div>
+          <label class="field"><span>Utente</span><input id="nas-user" type="text" spellcheck="false" autocomplete="off"></label>
+          <label class="field"><span>Password</span><input id="nas-password" type="password" autocomplete="off" placeholder="Inserisci la password"></label>
+          <label class="field"><span>Cartella film</span><input id="nas-film" type="text" placeholder="/home/Film" spellcheck="false" autocomplete="off"></label>
+          <label class="field"><span>Cartella serie TV</span><input id="nas-tv" type="text" placeholder="/home/Serie TV" spellcheck="false" autocomplete="off"></label>
+        </div>
+
+        <p class="form-note">La password viene salvata nella Gestione credenziali di Windows, non nei file del progetto.</p>
+        <div id="nas-result"></div>
+
+        <div class="settings-actions">
+          <button class="button ghost" type="button" id="nas-test">Prova connessione</button>
+          <button class="button primary" type="submit" id="nas-save">Salva</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
