@@ -3,7 +3,9 @@
 # Class import
 import Src.Api.page as Page
 from Src.Api import film, tv
+from Src.Gui.recommend import Recommender
 from Src.Lib.Nas import nas
+from Src.Util import history
 from Src.Util.cancel import DownloadCancelled
 from Src.Util.console import console
 from Src.Util.os import remove_folder
@@ -303,6 +305,10 @@ class DownloadManager:
             except Exception as e:
                 status, error = 'error', str(e) or type(e).__name__
 
+            # Past downloads are the base of the recommendations
+            if status == 'done' and not job['upload_only']:
+                history.add(job['title_id'], job['slug'], job['name'], job['type'], job['year'])
+
             with self.lock:
                 job.update(output=output, remote=remote, warning=warning, status=status, error=error, upload_only=False)
 
@@ -430,6 +436,7 @@ class App:
     def __init__(self):
         self.site = Site()
         self.downloads = DownloadManager(self.site)
+        self.recommender = Recommender(self.site, format_title)
         self.server = None
         self.last_request = time.time()
 
@@ -469,6 +476,9 @@ class App:
             'label': slider['label'],
             'titles': [format_title(title, props['cdn_url']) for title in slider['titles']],
         } for slider in props.get('sliders') or []]}
+
+    def recommendations(self, query, body):
+        return self.recommender.get()
 
     def search(self, query, body):
         text = query.get('q', '').strip()
@@ -558,6 +568,7 @@ ROUTES = {
     ('GET', '/api/status'): App.status,
     ('POST', '/api/domain'): App.set_domain,
     ('GET', '/api/home'): App.home,
+    ('GET', '/api/recommendations'): App.recommendations,
     ('GET', '/api/search'): App.search,
     ('GET', '/api/title'): App.title,
     ('GET', '/api/season'): App.season,

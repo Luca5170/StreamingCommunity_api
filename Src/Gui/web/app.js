@@ -490,7 +490,8 @@ function renderHome() {
   const position = (slider) => (order.includes(slider.name) ? order.indexOf(slider.name) : order.length);
 
   rowUpdaters.clear();
-  $('#rows').replaceChildren(...[...sliders].sort((a, b) => position(a) - position(b)).map(renderRow));
+  $('#rows').replaceChildren(...[...sliders].sort((a, b) => position(a) - position(b)).map((slider) => renderRow(slider)));
+  loadRecommendations();
 
   const trending = sliders.find((slider) => slider.name === 'trending') || sliders[0];
   state.hero.items = (trending?.titles || []).filter((title) => title.backdrop).slice(0, 6);
@@ -639,7 +640,10 @@ function renderRow(slider) {
   requestAnimationFrame(update);
 
   return h('section', { class: `row${ranked ? ' row-top' : ''}`, 'aria-label': slider.label },
-    h('div', { class: 'row-head' }, h('h2', { class: 'row-title' }, slider.label)),
+    h('div', { class: 'row-head' },
+      h('div', {},
+        h('h2', { class: 'row-title' }, slider.label),
+        slider.subtitle ? h('p', { class: 'row-sub' }, slider.subtitle) : null)),
     h('div', { class: 'row-viewport' }, prev, track, next));
 }
 
@@ -668,7 +672,52 @@ function card(title, { index = 0, rank = null } = {}) {
     poster,
     h('span', { class: 'card-body', 'aria-hidden': 'true' },
       h('span', { class: 'card-title' }, title.name),
-      h('span', { class: 'card-meta' }, cardMeta(title))));
+      h('span', { class: 'card-meta' }, cardMeta(title)),
+      title.reason ? h('span', { class: 'card-reason', title: title.reason }, title.reason) : null));
+}
+
+/* ---------- Recommendations ---------- */
+
+let recommendationsRequest = 0;
+let recommendationsTimer = null;
+
+async function loadRecommendations() {
+  const requestId = ++recommendationsRequest;
+  let row = $('#recommended');
+
+  // First load shows a placeholder, a refresh keeps the old row until the new one is ready
+  if (!row) {
+    row = skeletonRow();
+    row.id = 'recommended';
+    $('#rows').prepend(row);
+  }
+
+  try {
+    const { titles, based_on: basedOn } = await api('/api/recommendations');
+    if (requestId !== recommendationsRequest || !document.contains(row)) return;
+
+    if (!titles.length) {
+      row.remove();
+      return;
+    }
+
+    const fresh = renderRow({
+      name: 'recommended',
+      label: 'Consigliati per te',
+      subtitle: `In base a ${plural(basedOn, 'titolo che hai scaricato', 'titoli che hai scaricato')}`,
+      titles,
+    });
+    fresh.id = 'recommended';
+    row.replaceWith(fresh);
+  } catch {
+    // Recommendations are extra, the home works without them
+    if (requestId === recommendationsRequest) row.remove();
+  }
+}
+
+function refreshRecommendations() {
+  clearTimeout(recommendationsTimer);
+  if (state.home) recommendationsTimer = setTimeout(loadRecommendations, 1500);
 }
 
 function cardMeta(title) {
@@ -1148,6 +1197,9 @@ function setJobs(jobs) {
   for (const job of jobs) {
     const before = previous.get(job.id);
     if (!before || before === job.status) continue;
+
+    // A new download changes what is recommended
+    if (job.status === 'done') refreshRecommendations();
 
     if (job.status === 'done' && job.warning) toast(`${jobName(job)}: NAS non raggiungibile, il file resta sul PC`, 'warning', { action: 'Apri', onAction: openDownloads });
     else if (job.status === 'done' && job.remote) toast(`Caricato sul NAS: ${jobName(job)}`, 'success');

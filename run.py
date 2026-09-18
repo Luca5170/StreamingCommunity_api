@@ -7,6 +7,7 @@ from Src.Api.tv import main_dw_tv as download_tv
 from Src.Util.message import msg_start
 from Src.Util.console import console, msg
 from Src.Util.os import remove_folder
+from Src.Util import history
 from Src.Upload.update import main_update
 from Src.Lib.FFmpeg.installer import check_ffmpeg
 
@@ -42,6 +43,9 @@ def download_title(selected_title, site_version, domain):
     else:
         console.print(f"[green]\nTv select: {selected_title['name']}")
         download_tv(selected_title['id'], selected_title['slug'], site_version, domain, media=media)
+
+    # Used by the recommendations of the gui
+    history.add(selected_title['id'], selected_title['slug'], selected_title['name'], selected_title['type'], selected_title.get('year'))
 
 def main():
 

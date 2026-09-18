@@ -18,6 +18,7 @@ videos/
 tmp/
 debug.log
 
-# Nas settings of this pc
+# Nas settings and download history of this pc
 nas.json
 nas_known_hosts
+history.json
