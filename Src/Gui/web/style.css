@@ -185,6 +185,61 @@ a {
   font-weight: 600;
 }
 
+.category-switch {
+  position: relative;
+  display: grid;
+  flex-shrink: 0;
+  grid-template-columns: 1fr 1fr;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(22, 24, 32, 0.55);
+  backdrop-filter: blur(14px);
+}
+
+.category-switch::before {
+  content: "";
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  left: 4px;
+  width: calc(50% - 4px);
+  border-radius: 999px;
+  background: var(--text);
+  transition: transform 0.4s var(--ease);
+}
+
+.category-switch[data-active="anime"]::before {
+  transform: translateX(100%);
+}
+
+.category {
+  position: relative;
+  z-index: 1;
+  height: 32px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  color: var(--muted);
+  font-size: 13.5px;
+  font-weight: 650;
+  white-space: nowrap;
+  transition: color 0.25s;
+}
+
+.category:hover {
+  color: var(--text);
+}
+
+.category[aria-selected="true"] {
+  color: var(--bg);
+}
+
+.label-short {
+  display: none;
+}
+
 .search {
   position: relative;
   flex: 1;
@@ -789,6 +844,41 @@ a {
 .hero-skeleton {
   display: grid;
   gap: 14px;
+}
+
+/* Banners of anime are wide and low: a shorter hero with the poster */
+.hero.compact {
+  height: min(66vh, 600px);
+  min-height: 500px;
+}
+
+.hero.compact .hero-content {
+  bottom: clamp(84px, 12vh, 116px);
+  width: min(880px, calc(100% - 2 * var(--gutter)));
+}
+
+.hero.compact .hero-dots {
+  bottom: clamp(92px, 12vh, 124px);
+}
+
+.hero.compact .hero-title {
+  font-size: clamp(30px, 4vw, 54px);
+}
+
+.hero-with-poster {
+  display: flex;
+  align-items: flex-end;
+  gap: 30px;
+}
+
+.hero-poster {
+  flex-shrink: 0;
+  width: 190px;
+  box-shadow: 0 30px 60px -20px rgba(0, 0, 0, 0.95);
+}
+
+.hero-text {
+  min-width: 0;
 }
 
 /* ---------- Rows ---------- */
@@ -1751,6 +1841,38 @@ a {
   border-radius: 16px;
 }
 
+/* Episodes of anime: no image and no plot, a grid of small boxes */
+.episodes.compact {
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+}
+
+.episodes.compact .episode {
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  padding: 12px 14px;
+  animation-delay: calc(min(var(--i, 0), 24) * 12ms);
+}
+
+.episodes.compact .episode-title {
+  font-size: 14px;
+}
+
+.related {
+  margin-top: 36px;
+  padding-top: 28px;
+  border-top: 1px solid var(--line);
+}
+
+.related .section-title {
+  margin-bottom: 18px;
+}
+
+.related-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  gap: 24px 14px;
+}
+
 /* ---------- Downloads drawer ---------- */
 
 .drawer-panel {
@@ -2403,9 +2525,41 @@ a {
 
   .search-hint,
   .status-chip,
-  .hero-dots {
+  .hero-dots,
+  .label-long,
+  .hero-poster {
     display: none;
   }
+
+  .label-short {
+    display: inline;
+  }
+
+  .category {
+    padding: 0 11px;
+  }
+
+  .search {
+    min-width: 0;
+  }
+
+  .search input {
+    padding: 0 12px 0 40px;
+  }
+
+  .topbar-actions {
+    gap: 4px;
+  }
+}
+
+/* Phones: the switch of the category takes the place of the logo */
+@media (max-width: 420px) {
+  .brand {
+    display: none;
+  }
+}
+
+@media (max-width: 640px) {
 
   .hero {
     min-height: 580px;

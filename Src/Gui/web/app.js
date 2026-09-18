@@ -67,21 +67,42 @@ function formatRuntime(minutes) {
   return rest ? `${hours} h ${rest} min` : `${hours} h`;
 }
 
+function isAnime(title) {
+  return title?.source === 'anime';
+}
+
+// Ids of the two sites can be the same number
+function keyOf(title) {
+  return `${title.source || 'sc'}:${title.id}`;
+}
+
+function apiPath(source, path) {
+  return source === 'anime' ? `/api/anime${path}` : `/api${path}`;
+}
+
 function titleKind(title) {
+  if (isAnime(title)) return !title.label || title.label === 'Anime' ? 'Anime' : `Anime · ${title.label}`;
   return title.type === 'tv' ? 'Serie TV' : 'Film';
 }
 
 function titleLength(title) {
+  if (isAnime(title) && title.type === 'tv') return title.episodes_count ? plural(title.episodes_count, 'episodio', 'episodi') : null;
   if (title.type === 'tv') return title.seasons_count ? plural(title.seasons_count, 'stagione', 'stagioni') : null;
   return formatRuntime(title.runtime);
 }
 
 function episodeCode(job) {
+  if (job.source === 'anime') return `E${String(job.episode_number).padStart(2, '0')}`;
   return `S${String(job.season).padStart(2, '0')}E${String(job.episode_number).padStart(2, '0')}`;
 }
 
 function jobName(job) {
   return job.type === 'tv' ? `${job.name} ${episodeCode(job)}` : job.name;
+}
+
+function jobSubtitle(job) {
+  if (job.source === 'anime') return job.type === 'tv' ? `Anime · Episodio ${job.episode_number}` : 'Film anime';
+  return job.type === 'tv' ? [episodeCode(job), job.episode_name].filter(Boolean).join(' · ') : 'Film';
 }
 
 function scoreNode(score) {
@@ -161,9 +182,23 @@ const STAGES = {
   upload: { label: 'Caricamento sul NAS', from: 88, to: 100 },
 };
 
+const CATEGORIES = {
+  sc: { label: 'Film e Serie', search: 'Cerca film e serie TV', hero: (index) => `N° ${index + 1} in tendenza` },
+  anime: { label: 'Anime', search: 'Cerca anime', hero: () => 'In evidenza' },
+};
+
+function savedCategory() {
+  try {
+    return localStorage.getItem('category') === 'anime' ? 'anime' : 'sc';
+  } catch {
+    return 'sc';
+  }
+}
+
 const state = {
   status: null,
-  home: null,
+  category: savedCategory(),
+  homes: {},
   hero: { items: [], index: 0, timer: null, contentTimer: null },
   searchId: 0,
   detail: null,
@@ -287,6 +322,7 @@ async function loadNas() {
     $('#nas-user').value = config.user || '';
     $('#nas-film').value = config.film_path || '';
     $('#nas-tv').value = config.tv_path || '';
+    $('#nas-anime').value = config.anime_path || '';
     $('#nas-password').value = '';
     $('#nas-password').placeholder = config.password_saved ? 'Password salvata' : 'Inserisci la password';
   } catch (error) {
@@ -302,6 +338,7 @@ function readNas() {
     user: $('#nas-user').value.trim(),
     film_path: $('#nas-film').value.trim(),
     tv_path: $('#nas-tv').value.trim(),
+    anime_path: $('#nas-anime').value.trim(),
     password: $('#nas-password').value,
   };
 }
@@ -331,7 +368,7 @@ async function testNas() {
       return;
     }
 
-    const labels = { film_path: 'Film', tv_path: 'Serie TV' };
+    const labels = { film_path: 'Film', tv_path: 'Serie TV', anime_path: 'Anime' };
     const details = [];
 
     for (const [key, folder] of Object.entries(result.folders)) {
@@ -414,10 +451,11 @@ async function submitDomain(event) {
     closeLayer($('#settings'));
     toast(`Connesso a ${state.status.site}`, 'success');
 
-    if (previous !== state.status.domain || !state.home) {
+    if (previous !== state.status.domain || !state.homes.sc) {
       detailCache.clear();
       seasonCache.clear();
-      loadHome();
+      delete state.homes.sc;
+      if (state.category === 'sc') loadHome();
     }
   } catch (requestError) {
     error.textContent = requestError.message;
@@ -431,18 +469,32 @@ async function submitDomain(event) {
 /* ---------- Home ---------- */
 
 async function loadHome() {
+  const category = state.category;
+  $('#home-view').dataset.category = category;
+
+  // Films and series need their site connected, anime come from another site
+  if (category === 'sc' && !state.status?.connected) {
+    renderHomeMessage('Collega il sito per iniziare',
+      state.status?.error || "Inserisci l'estensione attuale del sito per vedere i titoli del momento e cercare film e serie TV.",
+      h('button', { class: 'button primary', type: 'button', onclick: () => openSettings() }, icon('globe'), 'Imposta il sito'));
+    return;
+  }
+
   renderHomeLoading();
 
   try {
-    state.home = await api('/api/home');
-    renderHome();
+    const home = await api(apiPath(category, '/home'));
+    state.homes[category] = home;
+    if (category === state.category) renderHome();
   } catch (error) {
+    if (category !== state.category) return;
     renderHomeMessage('Home non disponibile', error.message,
       h('button', { class: 'button glass', type: 'button', onclick: loadHome }, icon('retry'), 'Riprova'));
   }
 }
 
 function renderHomeLoading() {
+  $('#hero').classList.toggle('compact', state.category === 'anime');
   const content = $('#hero-content');
 
   content.replaceChildren(h('div', { class: 'hero-skeleton', 'aria-hidden': 'true' },
@@ -485,16 +537,22 @@ function renderHomeMessage(title, text, action) {
 }
 
 function renderHome() {
-  const sliders = (state.home.sliders || []).filter((slider) => slider.titles.length);
+  const home = state.homes[state.category];
+  const sliders = (home.sliders || []).filter((slider) => slider.titles.length);
   const order = ['top10', 'trending', 'latest'];
   const position = (slider) => (order.includes(slider.name) ? order.indexOf(slider.name) : order.length);
+
+  $('#home-view').dataset.category = state.category;
+  $('#hero').classList.toggle('compact', state.category === 'anime');
 
   rowUpdaters.clear();
   $('#rows').replaceChildren(...[...sliders].sort((a, b) => position(a) - position(b)).map((slider) => renderRow(slider)));
   loadRecommendations();
 
+  // Anime have their own featured titles, films and series use the trending ones
   const trending = sliders.find((slider) => slider.name === 'trending') || sliders[0];
-  state.hero.items = (trending?.titles || []).filter((title) => title.backdrop).slice(0, 6);
+  state.hero.items = (home.hero || trending?.titles || []).filter((title) => title.backdrop).slice(0, 8);
+  state.hero.index = 0;
 
   if (state.hero.items.length) {
     showHero(0);
@@ -537,7 +595,7 @@ function showHero(index) {
 }
 
 function heroContent(title) {
-  const detail = detailCache.get(title.id);
+  const detail = detailCache.get(keyOf(title));
   const heading = title.logo
     ? h('h1', { class: 'hero-heading' }, h('img', {
       class: 'hero-logo',
@@ -551,15 +609,19 @@ function heroContent(title) {
     ? h('button', { class: 'button primary', type: 'button', onclick: () => openDetail(title) }, icon('download'), 'Scegli episodi')
     : h('button', { class: 'button primary', type: 'button', onclick: () => queueMovie(title) }, icon('download'), 'Scarica film');
 
-  return [
-    h('p', { class: 'eyebrow' }, h('span', { class: 'eyebrow-dot' }), `N° ${state.hero.index + 1} in tendenza`),
+  const text = [
+    h('p', { class: 'eyebrow' }, h('span', { class: 'eyebrow-dot' }), CATEGORIES[state.category].hero(state.hero.index)),
     heading,
     heroMeta(title, detail),
-    h('p', { class: 'hero-plot' }, detail?.plot || ''),
+    h('p', { class: 'hero-plot' }, detail?.plot || title.plot || ''),
     h('div', { class: 'hero-actions' },
       primary,
       h('button', { class: 'button glass', type: 'button', onclick: () => openDetail(title) }, icon('info'), 'Dettagli')),
   ];
+
+  // Banners of anime are low, the poster next to the title fills the space
+  if (!isAnime(title) || !title.poster) return text;
+  return [h('div', { class: 'hero-with-poster' }, posterNode(title, 'poster hero-poster'), h('div', { class: 'hero-text' }, text))];
 }
 
 function heroMeta(title, detail) {
@@ -655,7 +717,7 @@ function card(title, { index = 0, rank = null } = {}) {
   const poster = posterNode(title);
 
   poster.append(...[
-    h('span', { class: 'poster-type' }, title.type === 'tv' ? 'Serie' : 'Film'),
+    h('span', { class: 'poster-type' }, title.label || (title.type === 'tv' ? 'Serie' : 'Film')),
     title.score ? h('span', { class: 'poster-score' }, icon('star', 'icon-fill'), title.score) : null,
     h('span', { class: 'poster-hover', 'aria-hidden': 'true' }, h('span', { class: 'poster-action' }, icon('info'))),
   ].filter(Boolean));
@@ -683,6 +745,7 @@ let recommendationsTimer = null;
 
 async function loadRecommendations() {
   const requestId = ++recommendationsRequest;
+  const category = state.category;
   let row = $('#recommended');
 
   // First load shows a placeholder, a refresh keeps the old row until the new one is ready
@@ -693,8 +756,8 @@ async function loadRecommendations() {
   }
 
   try {
-    const { titles, based_on: basedOn } = await api('/api/recommendations');
-    if (requestId !== recommendationsRequest || !document.contains(row)) return;
+    const { titles, based_on: basedOn } = await api(apiPath(category, '/recommendations'));
+    if (requestId !== recommendationsRequest || category !== state.category || !document.contains(row)) return;
 
     if (!titles.length) {
       row.remove();
@@ -717,13 +780,22 @@ async function loadRecommendations() {
 
 function refreshRecommendations() {
   clearTimeout(recommendationsTimer);
-  if (state.home) recommendationsTimer = setTimeout(loadRecommendations, 1500);
+  if (state.homes[state.category] && !$('#home-view').hidden) recommendationsTimer = setTimeout(loadRecommendations, 1500);
 }
 
 function cardMeta(title) {
-  const length = title.type === 'tv'
-    ? (title.seasons_count ? plural(title.seasons_count, 'stagione', 'stagioni') : 'Serie TV')
-    : 'Film';
+  let length;
+
+  if (isAnime(title)) {
+    length = title.type === 'tv' && title.episodes_count ? plural(title.episodes_count, 'episodio', 'episodi') : title.label;
+
+    // The dubbed copy has the same name and poster of the original one
+    if (title.dub) return [title.year, length, 'ITA'].filter(Boolean).join(' · ');
+  } else {
+    length = title.type === 'tv'
+      ? (title.seasons_count ? plural(title.seasons_count, 'stagione', 'stagioni') : 'Serie TV')
+      : 'Film';
+  }
 
   return [title.year, length].filter(Boolean).join(' · ');
 }
@@ -745,20 +817,22 @@ function onSearchInput() {
 
 async function runSearch(query) {
   clearTimeout(searchTimer);
+  const category = state.category;
 
-  if (!state.status?.connected) {
+  if (category === 'sc' && !state.status?.connected) {
     openSettings();
     return;
   }
 
   const searchId = ++state.searchId;
   showView('search');
+  $('#search-view .eyebrow').textContent = `Risultati della ricerca · ${CATEGORIES[category].label}`;
   $('#search-title').textContent = `“${query}”`;
   $('#search-count').textContent = 'Ricerca in corso…';
   $('#results').replaceChildren(...Array.from({ length: 14 }, skeletonCard));
 
   try {
-    const { results } = await api(`/api/search?q=${encodeURIComponent(query)}`);
+    const { results } = await api(apiPath(category, `/search?q=${encodeURIComponent(query)}`));
     if (searchId !== state.searchId) return;
 
     $('#search-count').textContent = results.length ? plural(results.length, 'titolo trovato', 'titoli trovati') : '';
@@ -790,7 +864,47 @@ function goHome() {
   $('#search-clear').hidden = true;
   showView('home');
 
-  if (!state.home && state.status?.connected) loadHome();
+  // The home on screen can be of the other category
+  if ($('#home-view').dataset.category !== state.category) {
+    if (state.homes[state.category]) renderHome();
+    else loadHome();
+  }
+}
+
+/* ---------- Categories ---------- */
+
+function setCategory(category) {
+  if (category === state.category) {
+    goHome();
+    return;
+  }
+
+  state.category = category;
+
+  try {
+    localStorage.setItem('category', category);
+  } catch {
+    // Only the choice of the next start is lost
+  }
+
+  renderCategory();
+
+  // A search on screen is done again in the new category
+  const query = searchInput.value.trim();
+  if (query && !$('#search-view').hidden) runSearch(query);
+  else goHome();
+}
+
+function renderCategory() {
+  const { search } = CATEGORIES[state.category];
+
+  $$('#category-switch .category').forEach((button) => {
+    button.setAttribute('aria-selected', String(button.dataset.category === state.category));
+  });
+  $('#category-switch').dataset.active = state.category;
+
+  searchInput.placeholder = search;
+  searchInput.setAttribute('aria-label', search);
 }
 
 function updateTopbar() {
@@ -800,25 +914,35 @@ function updateTopbar() {
 /* ---------- Detail ---------- */
 
 function getDetail(title) {
-  if (detailCache.has(title.id)) return Promise.resolve(detailCache.get(title.id));
+  const key = keyOf(title);
+  if (detailCache.has(key)) return Promise.resolve(detailCache.get(key));
 
-  if (!detailRequests.has(title.id)) {
-    const request = api(`/api/title?id=${title.id}&slug=${encodeURIComponent(title.slug)}`)
+  if (!detailRequests.has(key)) {
+    const request = api(apiPath(title.source, `/title?id=${title.id}&slug=${encodeURIComponent(title.slug || '')}`))
       .then((detail) => {
-        detailCache.set(title.id, detail);
+        detailCache.set(key, detail);
         return detail;
       })
-      .finally(() => detailRequests.delete(title.id));
+      .finally(() => detailRequests.delete(key));
 
-    detailRequests.set(title.id, request);
+    detailRequests.set(key, request);
   }
 
-  return detailRequests.get(title.id);
+  return detailRequests.get(key);
+}
+
+// Seasons for series, blocks of episodes for anime that can have more than a thousand
+function episodeGroups(detail) {
+  if (isAnime(detail)) {
+    return (detail.groups || []).map((group) => ({ key: `${group.start}-${group.end}`, label: `${group.start}–${group.end}`, ...group }));
+  }
+
+  return (detail.seasons || []).map((number) => ({ key: String(number), label: `Stagione ${number}`, number }));
 }
 
 async function openDetail(title) {
   const detailId = ++state.detailId;
-  const cached = detailCache.get(title.id);
+  const cached = detailCache.get(keyOf(title));
   const layer = $('#detail');
 
   state.detail = cached || title;
@@ -848,15 +972,16 @@ async function openDetail(title) {
     renderDetail(detail, false);
   }
 
-  if (detail.type === 'tv' && detail.seasons.length) selectSeason(detail.seasons[0]);
+  const groups = episodeGroups(detail);
+  if (detail.type === 'tv' && groups.length) selectSeason(groups[0].key);
 }
 
 function renderDetail(detail, loading) {
   const container = $('#detail-content');
-  const fresh = container.dataset.titleId !== String(detail.id);
+  const fresh = container.dataset.titleId !== keyOf(detail);
 
   if (fresh) {
-    container.dataset.titleId = String(detail.id);
+    container.dataset.titleId = keyOf(detail);
     container.replaceChildren(
       h('div', { class: 'detail-hero' },
         detail.backdrop ? image(detail.backdrop, 'detail-backdrop', { lazy: false }) : null,
@@ -893,6 +1018,7 @@ function detailInfo(detail, animate) {
       pill(detail.quality),
       detail.age ? pill(`${detail.age}+`) : null,
       detail.sub_ita ? pill('Sub ITA') : null,
+      detail.dub ? pill('Doppiato') : null,
     ]),
     detail.genres?.length ? h('div', { class: 'genres' }, detail.genres.map((genre) => h('span', { class: 'genre' }, genre))) : null);
 }
@@ -906,10 +1032,13 @@ function detailLoading() {
 }
 
 function detailBody(detail) {
-  const credits = [
-    detail.directors?.length ? h('div', {}, h('dt', {}, 'Regia'), h('dd', {}, detail.directors.join(', '))) : null,
-    detail.actors?.length ? h('div', {}, h('dt', {}, 'Cast'), h('dd', {}, detail.actors.join(', '))) : null,
-  ].filter(Boolean);
+  // Anime give studio and state, films and series give direction and cast
+  const credits = detail.credits
+    ? detail.credits.map((credit) => h('div', {}, h('dt', {}, credit.label), h('dd', {}, credit.value)))
+    : [
+      detail.directors?.length ? h('div', {}, h('dt', {}, 'Regia'), h('dd', {}, detail.directors.join(', '))) : null,
+      detail.actors?.length ? h('div', {}, h('dt', {}, 'Cast'), h('dd', {}, detail.actors.join(', '))) : null,
+    ].filter(Boolean);
 
   // Long plots are collapsed so episodes stay close
   const plot = h('p', { class: 'plot clamped' }, detail.plot || 'Trama non disponibile.');
@@ -930,7 +1059,10 @@ function detailBody(detail) {
         more,
         detail.type === 'tv' ? null : h('div', { class: 'detail-actions' }, movieButton(detail))),
       credits.length ? h('dl', { class: 'credits' }, credits) : null),
-    detail.type === 'tv' ? h('section', { class: 'seasons', id: 'seasons', 'aria-label': 'Episodi' }) : null);
+    detail.type === 'tv' ? h('section', { class: 'seasons', id: 'seasons', 'aria-label': 'Episodi' }) : null,
+    detail.related?.length ? h('section', { class: 'related', 'aria-label': 'Correlati' },
+      h('h3', { class: 'section-title' }, 'Correlati'),
+      h('div', { class: 'related-grid' }, detail.related.map((title, index) => card(title, { index })))) : null);
 }
 
 function movieButton(detail) {
@@ -940,7 +1072,7 @@ function movieButton(detail) {
 }
 
 function updateMovieButton(button, detail) {
-  const job = findJob(detail.id);
+  const job = findJob(detail);
   const percent = Math.floor(jobPercent(job));
   const [style, iconName, label, disabled] = {
     queued: ['glass', 'download', 'In coda', true],
@@ -967,40 +1099,45 @@ function updateMovieButton(button, detail) {
 function renderSeasonTabs() {
   const container = $('#seasons');
   const detail = state.detail;
+  const groups = episodeGroups(detail);
   if (!container) return;
 
-  if (!detail.seasons.length) {
+  if (!groups.length) {
     container.replaceChildren(emptyState('film', 'Nessun episodio disponibile', 'Questa serie non ha ancora episodi da scaricare.'));
     return;
   }
 
+  // An anime with less than a hundred episodes has a single block, no tabs are needed
+  const tabs = groups.length > 1 || !isAnime(detail)
+    ? h('div', { class: 'tabs', role: 'tablist', 'aria-label': isAnime(detail) ? 'Episodi' : 'Stagioni' }, groups.map((group) => h('button', {
+      class: 'tab',
+      type: 'button',
+      role: 'tab',
+      dataset: { season: group.key },
+      'aria-selected': String(group.key === state.season),
+      onclick: () => group.key !== state.season && selectSeason(group.key),
+    }, group.label)))
+    : null;
+
   container.replaceChildren(
-    h('div', { class: 'seasons-head' },
-      h('h3', { class: 'section-title' }, 'Episodi'),
-      h('div', { class: 'tabs', role: 'tablist', 'aria-label': 'Stagioni' }, detail.seasons.map((number) => h('button', {
-        class: 'tab',
-        type: 'button',
-        role: 'tab',
-        dataset: { season: number },
-        'aria-selected': String(number === state.season),
-        onclick: () => number !== state.season && selectSeason(number),
-      }, `Stagione ${number}`)))),
+    h('div', { class: 'seasons-head' }, h('h3', { class: 'section-title' }, 'Episodi'), tabs),
     h('div', { id: 'season-body' }));
 
   renderSeasonBody();
 }
 
-async function selectSeason(number) {
+async function selectSeason(key) {
   const detail = state.detail;
-  const key = `${detail.id}:${number}`;
+  const group = episodeGroups(detail).find((item) => item.key === key);
+  const cacheKey = `${keyOf(detail)}:${key}`;
 
-  state.season = number;
+  state.season = key;
   state.selected = new Set();
-  state.episodes = seasonCache.get(key) || null;
+  state.episodes = seasonCache.get(cacheKey) || null;
 
   const tabs = $('#seasons .tabs');
   $$('.tab', tabs || document.createElement('div')).forEach((tab) => {
-    const selected = Number(tab.dataset.season) === number;
+    const selected = tab.dataset.season === key;
     tab.setAttribute('aria-selected', String(selected));
 
     // Center the selected tab inside the strip
@@ -1013,13 +1150,17 @@ async function selectSeason(number) {
   renderSeasonBody();
   if (state.episodes) return;
 
+  const path = isAnime(detail)
+    ? `/api/anime/episodes?id=${detail.id}&start=${group.start}&end=${group.end}`
+    : `/api/season?id=${detail.id}&slug=${encodeURIComponent(detail.slug)}&number=${group.number}`;
+
   try {
-    const { episodes } = await api(`/api/season?id=${detail.id}&slug=${encodeURIComponent(detail.slug)}&number=${number}`);
-    seasonCache.set(key, episodes);
-    if (state.detail !== detail || state.season !== number) return;
+    const { episodes } = await api(path);
+    seasonCache.set(cacheKey, episodes);
+    if (state.detail !== detail || state.season !== key) return;
     state.episodes = episodes;
   } catch (error) {
-    if (state.detail !== detail || state.season !== number) return;
+    if (state.detail !== detail || state.season !== key) return;
     state.episodes = error;
   }
 
@@ -1037,7 +1178,7 @@ function renderSeasonBody() {
   } else if (!state.episodes.length) {
     body.replaceChildren(emptyState('film', 'Nessun episodio', 'Questa stagione non ha ancora episodi disponibili.'));
   } else {
-    body.replaceChildren(episodesToolbar(), h('div', { class: 'episodes' }, state.episodes.map(episodeRow)));
+    body.replaceChildren(episodesToolbar(), h('div', { class: `episodes${isAnime(state.detail) ? ' compact' : ''}` }, state.episodes.map(episodeRow)));
     updateSelection();
     refreshDetailStates();
   }
@@ -1059,14 +1200,17 @@ function episodeRow(episode, index) {
     updateSelection();
   });
 
+  // Episodes of anime have no image and no plot, they are small boxes in a grid
+  const compact = isAnime(state.detail);
+
   return h('label', { class: 'episode', style: `--i:${index}`, dataset: { episodeId: episode.id } },
     input,
-    h('span', { class: 'episode-thumb', style: `--hue:${hue(episode.id)}` },
+    compact ? null : h('span', { class: 'episode-thumb', style: `--hue:${hue(episode.id)}` },
       episode.cover ? image(episode.cover) : null,
       episode.duration ? h('span', { class: 'episode-duration' }, `${episode.duration} min`) : null),
     h('span', { class: 'episode-info' },
       h('span', { class: 'episode-title' },
-        h('span', { class: 'episode-number' }, episode.number),
+        compact ? null : h('span', { class: 'episode-number' }, episode.number),
         h('span', { class: 'episode-name' }, episode.name),
         h('span', { class: 'episode-state' })),
       episode.plot ? h('span', { class: 'episode-plot' }, episode.plot) : null),
@@ -1110,10 +1254,11 @@ function queueSelectedEpisodes() {
       id: detail.id,
       slug: detail.slug,
       name: detail.name,
+      source: detail.source || 'sc',
       year: detail.year,
       type: 'tv',
       poster: detail.poster,
-      season: state.season,
+      season: isAnime(detail) ? null : Number(state.season),
       episode_id: episode.id,
       episode_number: episode.number,
       episode_name: episode.name,
@@ -1134,7 +1279,7 @@ function refreshDetailStates() {
   if (button) updateMovieButton(button, detail);
 
   $$('#season-body .episode').forEach((row) => {
-    const job = findJob(detail.id, Number(row.dataset.episodeId));
+    const job = findJob(detail, Number(row.dataset.episodeId));
     const chip = $('.episode-state', row);
     const status = job?.status || '';
 
@@ -1150,8 +1295,20 @@ function refreshDetailStates() {
 
 /* ---------- Downloads ---------- */
 
-function queueMovie(title) {
-  queueDownloads([{ id: title.id, slug: title.slug, name: title.name, year: title.year, type: 'movie', poster: title.poster }]);
+async function queueMovie(title) {
+  let movie = title;
+
+  // Anime from lists of related titles come without slug, the page of the anime has it
+  if (!title.slug) {
+    try {
+      movie = await getDetail(title);
+    } catch (error) {
+      toast(error.message, 'error');
+      return;
+    }
+  }
+
+  queueDownloads([{ id: movie.id, slug: movie.slug, name: movie.name, source: movie.source || 'sc', year: movie.year, type: 'movie', poster: movie.poster }]);
 }
 
 async function queueDownloads(items) {
@@ -1211,11 +1368,12 @@ function setJobs(jobs) {
   renderJobs();
 }
 
-function findJob(titleId, episodeId = null) {
+function findJob(title, episodeId = null) {
   const priority = { running: 0, queued: 1, done: 2, error: 3, cancelled: 4 };
+  const source = title.source || 'sc';
 
   return state.jobs
-    .filter((job) => job.title_id === titleId && (job.episode_id ?? null) === episodeId)
+    .filter((job) => (job.source || 'sc') === source && job.title_id === title.id && (job.episode_id ?? null) === episodeId)
     .sort((a, b) => priority[a.status] - priority[b.status] || b.id - a.id)[0] || null;
 }
 
@@ -1303,7 +1461,7 @@ function createJobNode(job) {
     posterNode({ id: job.title_id, name: job.name, poster: job.poster }, 'poster job-poster'),
     h('div', { class: 'job-main' },
       h('div', { class: 'job-title', title: job.name }, job.name),
-      h('div', { class: 'job-sub' }, job.type === 'tv' ? [episodeCode(job), job.episode_name].filter(Boolean).join(' · ') : 'Film'),
+      h('div', { class: 'job-sub' }, jobSubtitle(job)),
       h('div', { class: 'progress', role: 'progressbar', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-label': `Avanzamento di ${jobName(job)}` },
         h('span', { class: 'progress-bar' })),
       h('div', { class: 'job-status' }, h('span', { class: 'job-state' }), h('span', { class: 'job-eta' }))),
@@ -1452,6 +1610,8 @@ async function retryJob(job) {
     id: job.title_id,
     slug: job.slug,
     name: job.name,
+    source: job.source,
+    year: job.year,
     type: job.type,
     poster: job.poster,
     season: job.season,
@@ -1525,6 +1685,7 @@ function bindEvents() {
   $('#nas-form').addEventListener('submit', saveNas);
   $('#nas-test').addEventListener('click', testNas);
   $$('.settings-tabs .tab').forEach((tab) => tab.addEventListener('click', () => showSettingsPanel(tab.dataset.panel)));
+  $$('#category-switch .category').forEach((button) => button.addEventListener('click', () => setCategory(button.dataset.category)));
   $('#detail').addEventListener('layerclose', () => {
     state.detailId += 1;
     state.detail = null;
@@ -1593,19 +1754,14 @@ function bindEvents() {
 
 async function init() {
   bindEvents();
+  renderCategory();
   renderJobs();
   pollDownloads();
 
   const status = await loadStatus();
+  loadHome();
 
-  if (status.connected) {
-    loadHome();
-  } else {
-    renderHomeMessage('Collega il sito per iniziare',
-      status.error || "Inserisci l'estensione attuale del sito per vedere i titoli del momento e cercare film e serie TV.",
-      h('button', { class: 'button primary', type: 'button', onclick: () => openSettings() }, icon('globe'), 'Imposta il sito'));
-    openSettings({ welcome: !status.domain });
-  }
+  if (!status.connected && state.category === 'sc') openSettings({ welcome: !status.domain });
 
   if (status.ffmpeg === false) toast('FFmpeg non trovato: i download non funzioneranno finché non lo installi', 'error');
 }

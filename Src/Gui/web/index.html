@@ -15,6 +15,13 @@
       <span class="brand-name">SC <span>Downloader</span></span>
     </a>
 
+    <div class="category-switch" id="category-switch" role="tablist" aria-label="Categoria" data-active="sc">
+      <button class="category" type="button" role="tab" data-category="sc" aria-selected="true">
+        <span class="label-long">Film e Serie</span><span class="label-short">Film</span>
+      </button>
+      <button class="category" type="button" role="tab" data-category="anime" aria-selected="false">Anime</button>
+    </div>
+
     <form class="search" id="search-form" role="search" autocomplete="off">
       <svg class="search-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
       <input id="search-input" type="search" placeholder="Cerca film e serie TV" aria-label="Cerca film e serie TV" spellcheck="false" enterkeyhint="search">
@@ -146,6 +153,7 @@
           <label class="field"><span>Password</span><input id="nas-password" type="password" autocomplete="off" placeholder="Inserisci la password"></label>
           <label class="field"><span>Cartella film</span><input id="nas-film" type="text" placeholder="/home/Film" spellcheck="false" autocomplete="off"></label>
           <label class="field"><span>Cartella serie TV</span><input id="nas-tv" type="text" placeholder="/home/Serie TV" spellcheck="false" autocomplete="off"></label>
+          <label class="field"><span>Cartella anime</span><input id="nas-anime" type="text" placeholder="/home/Anime" spellcheck="false" autocomplete="off"></label>
         </div>
 
         <p class="form-note">La password viene salvata nella Gestione credenziali di Windows, non nei file del progetto.</p>

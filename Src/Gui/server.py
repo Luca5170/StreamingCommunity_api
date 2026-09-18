@@ -2,8 +2,10 @@
 
 # Class import
 import Src.Api.page as Page
-from Src.Api import film, tv
+from Src.Api import anime, film, tv
+from Src.Gui.anime_source import AnimeSource
 from Src.Gui.recommend import Recommender
+from Src.Gui.anime_recommend import AnimeRecommender
 from Src.Lib.Nas import nas
 from Src.Util import history
 from Src.Util.cancel import DownloadCancelled
@@ -127,6 +129,7 @@ def format_title(title, cdn_url):
         'id': title['id'],
         'slug': title['slug'],
         'name': title['name'],
+        'source': 'sc',
         'type': title['type'],
         'score': title.get('score'),
         'year': date[:4] or None,
@@ -180,6 +183,7 @@ def read_nas(body):
         'user': str(body.get('user') or '').strip(),
         'film_path': str(body.get('film_path') or '').strip().rstrip('/'),
         'tv_path': str(body.get('tv_path') or '').strip().rstrip('/'),
+        'anime_path': str(body.get('anime_path') or '').strip().rstrip('/'),
     }
 
 def parse_slug(value):
@@ -222,6 +226,7 @@ class DownloadManager:
 
         job = {
             'id': None,
+            'source': 'anime' if item.get('source') == 'anime' else 'sc',
             'title_id': parse_int(item.get('id'), 'id'),
             'slug': parse_slug(item.get('slug')),
             'name': str(item.get('name') or item.get('slug')),
@@ -244,7 +249,13 @@ class DownloadManager:
             'cancel': False,
         }
 
-        if job['type'] == 'tv':
+        if job['source'] == 'anime':
+            # Films of anime have a single episode, it is found when the download starts
+            if job['type'] == 'tv':
+                job['episode_id'] = parse_int(item.get('episode_id'), 'episode_id')
+                job['episode_number'] = str(item.get('episode_number') or '')
+
+        elif job['type'] == 'tv':
             job['season'] = parse_int(item.get('season'), 'season')
             job['episode_id'] = parse_int(item.get('episode_id'), 'episode_id')
             job['episode_number'] = parse_int(item.get('episode_number'), 'episode_number')
@@ -258,8 +269,10 @@ class DownloadManager:
 
         with self.lock:
             for job in jobs:
+                # Ids of the two sites can be the same number
+                key = (job['source'], job['title_id'], job['episode_id'])
                 duplicate = next((other for other in self.jobs if other['status'] in ('queued', 'running')
-                                  and (other['title_id'], other['episode_id']) == (job['title_id'], job['episode_id'])), None)
+                                  and (other['source'], other['title_id'], other['episode_id']) == key), None)
 
                 if duplicate is None:
                     job['id'] = next(self.next_id)
@@ -307,13 +320,16 @@ class DownloadManager:
 
             # Past downloads are the base of the recommendations
             if status == 'done' and not job['upload_only']:
-                history.add(job['title_id'], job['slug'], job['name'], job['type'], job['year'])
+                history.add(job['title_id'], job['slug'], job['name'], job['type'], job['year'], source=job['source'])
 
             with self.lock:
                 job.update(output=output, remote=remote, warning=warning, status=status, error=error, upload_only=False)
 
     def get_media(self, job):
         """Data used to name the file and to build the path on the nas"""
+
+        if job['source'] == 'anime':
+            return {'name': job['name'], 'year': job['year'], 'type': 'anime', 'single': job['type'] == 'movie', 'episode_number': job['episode_number']}
 
         media = {'name': job['name'], 'year': job['year'], 'type': job['type']}
 
@@ -326,6 +342,9 @@ class DownloadManager:
         domain = self.site.domain
         media = self.get_media(job)
         self.check_cancel(job)
+
+        if job['source'] == 'anime':
+            return self.download_anime(job, progress, media)
 
         if job['type'] == 'movie':
             return film.main_dw_film(job['title_id'], job['slug'], domain, progress_callback=progress, media=media)
@@ -340,6 +359,21 @@ class DownloadManager:
         token = tv.get_token(job['title_id'], domain)
         self.check_cancel(job)
         return tv.dw_single_ep(job['title_id'], episodes, index, domain, token, job['slug'], job['season'], progress_callback=progress, media=media)
+
+    def download_anime(self, job, progress, media):
+        episode_id, number = job['episode_id'], job['episode_number']
+
+        # A film of anime is its first and only episode
+        if episode_id is None:
+            episodes = anime.client.get_episodes(job['title_id'], 1, 1)
+
+            if not episodes:
+                raise ValueError("Episodio non trovato")
+
+            episode_id, number = int(episodes[0]['id']), str(episodes[0]['number'])
+
+        self.check_cancel(job)
+        return anime.dw_episode(job['title_id'], job['slug'], episode_id, number, progress_callback=progress, media=media)
 
     def update(self, job, stage, done, total):
         """Progress of a job, it stops the download when the user cancels it"""
@@ -435,8 +469,10 @@ class DownloadManager:
 class App:
     def __init__(self):
         self.site = Site()
+        self.anime = AnimeSource()
         self.downloads = DownloadManager(self.site)
         self.recommender = Recommender(self.site, format_title)
+        self.anime_recommender = AnimeRecommender()
         self.server = None
         self.last_request = time.time()
 
@@ -501,6 +537,31 @@ class App:
             'number': number,
             'episodes': [format_episode(episode, props['cdn_url']) for episode in props['loadedSeason']['episodes']],
         }
+
+    def anime_home(self, query, body):
+        return self.anime.home()
+
+    def anime_recommendations(self, query, body):
+        return self.anime_recommender.get()
+
+    def anime_search(self, query, body):
+        text = query.get('q', '').strip()
+
+        if not text:
+            raise ApiError("Scrivi il titolo da cercare")
+
+        return self.anime.search(text)
+
+    def anime_title(self, query, body):
+        return self.anime.title(parse_int(query.get('id'), 'id'))
+
+    def anime_episodes(self, query, body):
+        anime_id, start, end = parse_int(query.get('id'), 'id'), parse_int(query.get('start'), 'start'), parse_int(query.get('end'), 'end')
+
+        if start < 1 or end < start or end - start > 500:
+            raise ApiError("Intervallo di episodi non valido")
+
+        return self.anime.episodes(anime_id, start, end)
 
     def list_downloads(self, query, body):
         return {'jobs': self.downloads.list()}
@@ -572,6 +633,11 @@ ROUTES = {
     ('GET', '/api/search'): App.search,
     ('GET', '/api/title'): App.title,
     ('GET', '/api/season'): App.season,
+    ('GET', '/api/anime/home'): App.anime_home,
+    ('GET', '/api/anime/search'): App.anime_search,
+    ('GET', '/api/anime/title'): App.anime_title,
+    ('GET', '/api/anime/episodes'): App.anime_episodes,
+    ('GET', '/api/anime/recommendations'): App.anime_recommendations,
     ('GET', '/api/downloads'): App.list_downloads,
     ('POST', '/api/downloads'): App.add_downloads,
     ('POST', '/api/downloads/remove'): App.remove_download,

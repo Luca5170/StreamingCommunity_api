@@ -44,6 +44,11 @@ def similarity(seed, title):
 
 
 # [ past downloads ]
+def get_past():
+    """Films and series of streamingcommunity, anime have their own history"""
+
+    return [title for title in history.load()['titles'] if (title.get('source') or 'sc') == 'sc']
+
 def parse_name(name):
     """Title and year from 'Mary Poppins (1964)', or the slug of old names like 'x-men-linizio.mp4'"""
 
@@ -63,7 +68,7 @@ def list_downloads():
     found = []
 
     def add(name, kind, is_folder, date):
-        if name.startswith('.') or name == 'subtitle' or name.endswith(('.parte', '.audio.mp4')):
+        if name.startswith('.') or name in ('subtitle', 'anime') or name.endswith(('.parte', '.audio.mp4')):
             return
         if not is_folder and not name.endswith('.mp4'):
             return
@@ -126,7 +131,7 @@ def import_downloads(site):
     with ThreadPoolExecutor(max_workers=6) as pool:
         titles = list(pool.map(match, found))
 
-    known = {title['id'] for title in history.load()['titles']}
+    known = {title['id'] for title in get_past()}
     imported = {}
 
     for item, title in zip(found, titles):
@@ -140,6 +145,7 @@ def import_downloads(site):
                     'type': title['type'],
                     'year': (title.get('last_air_date') or '')[:4] or None,
                     'date': item['date'],
+                    'source': 'sc',
                 }
 
     history.add_many(list(imported.values()), imported=True)
@@ -164,7 +170,7 @@ class Recommender:
             if not history.load()['imported']:
                 import_downloads(self.site)
 
-            past = history.load()['titles']
+            past = get_past()
             key = tuple(sorted((title['id'], title['date']) for title in past))
 
             if self.result is None or key != self.result_key or time.time() - self.result_time > CACHE_TIME:

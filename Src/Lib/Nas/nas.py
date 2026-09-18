@@ -21,6 +21,7 @@ DEFAULT_CONFIG = {
     'user': '',
     'film_path': '',
     'tv_path': '',
+    'anime_path': '',
 }
 
 # Characters not allowed in a file name
@@ -97,6 +98,12 @@ def get_title_folder(media):
     year = str(media.get('year') or '')
     return f"{title} ({year})" if year else title
 
+def format_episode_number(number):
+    """Numbers like 3 become 03, special episodes like 6.5 stay as they are"""
+
+    number = str(number or '0')
+    return f"{int(number):02d}" if number.isdigit() else clean_name(number)
+
 def get_file_name(media):
     """Readable name of the file, without extension"""
 
@@ -107,6 +114,10 @@ def get_file_name(media):
         episode = clean_name(media.get('episode_name'))
         return f"{title} - {code} - {episode}" if episode else f"{title} - {code}"
 
+    # Every anime of the site is a single season, films of anime have one episode
+    if media.get('type') == 'anime' and not media.get('single'):
+        return f"{title} - S01E{format_episode_number(media.get('episode_number'))}"
+
     year = str(media.get('year') or '')
     return f"{title} ({year})" if year else title
 
@@ -115,6 +126,10 @@ def get_remote_path(config, media):
 
     folder = get_title_folder(media) or 'Senza nome'
     file_name = f"{get_file_name(media)}.mp4"
+
+    if media.get('type') == 'anime':
+        base = config.get('anime_path') or config['tv_path'] or config['film_path']
+        return posixpath.join(base, folder, file_name) if media.get('single') else posixpath.join(base, folder, "Stagione 01", file_name)
 
     if media.get('type') == 'tv':
         season = f"Stagione {int(media.get('season') or 0):02d}"
@@ -234,7 +249,7 @@ def test_connection(config, password=None):
             home = None
 
         folders = {}
-        for key in ('film_path', 'tv_path'):
+        for key in ('film_path', 'tv_path', 'anime_path'):
             path = config.get(key)
 
             if not path:
