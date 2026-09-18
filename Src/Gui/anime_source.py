@@ -156,7 +156,15 @@ class AnimeSource:
         return {'results': format_many(anime.client.search(text))}
 
     def title(self, anime_id):
-        return format_detail(anime.client.get_info(anime_id))
+        info = anime.client.get_info(anime_id)
+
+        # The page of the anime has the related ones with images, without it they are shown with the initials
+        try:
+            info['related'] = anime.client.get_related(anime_id, info['slug']) or info.get('related')
+        except Exception as e:
+            console.log(f"[yellow]Anime: images of the related anime not available ({e})")
+
+        return format_detail(info)
 
     def episodes(self, anime_id, start, end):
         return {'episodes': [format_episode(episode) for episode in anime.client.get_episodes(anime_id, start, end)]}

@@ -87,6 +87,12 @@ class AnimeUnity:
     def get_info(self, anime_id):
         return self.request('GET', f'/info_api/{anime_id}/').json()
 
+    def get_related(self, anime_id, slug):
+        """Related anime with images and slug, the info api gives them without"""
+
+        player = BeautifulSoup(self.request('GET', f'/anime/{anime_id}-{slug}').text, "lxml").find('video-player')
+        return json.loads(player['anime']).get('related') or [] if player else []
+
     def get_episodes(self, anime_id, start, end):
         """Episodes from number start to end, asked in pages of the size allowed by the site"""
 
