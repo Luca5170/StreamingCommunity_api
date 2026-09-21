@@ -25,7 +25,7 @@ services:
       - TZ=Europe/Rome
 
       # Indirizzo mostrato nel QR code delle impostazioni (dentro il container non si vede quello vero)
-      # - SC_ADDRESS=http://192.168.1.23:8770
+      - SC_ADDRESS=http://192.168.1.23:8770
 
       # Password del NAS: nel container non c'è la gestione credenziali di Windows
       # - SC_NAS_PASSWORD=la-tua-password
