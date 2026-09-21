@@ -32,3 +32,6 @@ sc_downloader.instance.json
 *.tmp
 
 remote.json
+
+# Dati del container docker
+data/

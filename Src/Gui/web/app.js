@@ -1920,7 +1920,7 @@ async function init() {
   const status = await loadStatus();
   loadHome();
 
-  if (!status.connected && state.category === 'sc' && !status.remote_client) openSettings({ welcome: !status.domain });
+  if (!status.connected && state.category === 'sc') openSettings({ welcome: !status.domain });
 
   if (status.ffmpeg === false) toast('FFmpeg non trovato: i download non funzioneranno finché non lo installi', 'error');
 }

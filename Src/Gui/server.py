@@ -34,6 +34,7 @@ ACTIVE = ('queued', 'running', 'waiting')
 RETRY_DELAYS = (30, 120, 600)       # Seconds before the automatic attempts after an error
 NAS_RETRY_INTERVAL = 120            # How often the files the nas refused are tried again
 MAX_AUTO_UPLOADS = 5
+ADDRESS_ENV = "SC_ADDRESS"          # Address shown in the qr code, used by the docker image
 REMOTE_HOST = '0.0.0.0'             # Every network card of the pc, the key and the private addresses protect it
 SEGMENTS_MAX_AGE = 7 * 24 * 3600    # Segments of a download not resumed for a week are removed
 CONTENT_TYPES = {
@@ -766,7 +767,9 @@ class App:
 
     def remote_info(self):
         port = self.remote_server.server_port if self.remote_server else remote.load_config()['port']
-        addresses = [f"http://{ip}:{port}" for ip in remote.get_lan_ips()]
+
+        # In docker the pc is not the container: the address to show is given from outside
+        addresses = [os.environ[ADDRESS_ENV]] if os.environ.get(ADDRESS_ENV) else [f"http://{ip}:{port}" for ip in remote.get_lan_ips()]
 
         return {
             'running': self.remote_server is not None,
@@ -931,11 +934,12 @@ class App:
 
     def save_nas(self, query, body):
         config = nas.save_config(read_nas(body))
+        status = self.nas_status(config)
 
-        if body.get('password'):
-            nas.save_password(config, str(body['password']))
+        if body.get('password') and not nas.save_password(config, str(body['password'])):
+            status['password_error'] = f"Password non salvata: questo sistema non ha una gestione credenziali, usa la variabile {nas.PASSWORD_ENV}"
 
-        return self.nas_status(config)
+        return status
 
     def test_nas(self, query, body):
         config = read_nas(body)

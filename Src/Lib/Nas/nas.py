@@ -15,6 +15,7 @@ import keyring, paramiko
 CONFIG_FILE = "nas.json"
 KNOWN_HOSTS_FILE = "nas_known_hosts"
 KEYRING_SERVICE = "SC Downloader NAS"
+PASSWORD_ENV = "SC_NAS_PASSWORD"        # Used by the docker image, where there is no credential manager
 DEFAULT_CONFIG = {
     'enabled': False,
     'host': '',
@@ -65,7 +66,11 @@ def get_account(config):
     return f"{config['user']}@{config['host']}"
 
 def get_password(config):
-    """Read password from the credential manager of the system"""
+    """Password from the credential manager of the system, or from the environment (docker)"""
+
+    from_env = os.environ.get(PASSWORD_ENV)
+    if from_env:
+        return from_env
 
     if not config['host'] or not config['user']:
         return None
@@ -76,8 +81,17 @@ def get_password(config):
         return None
 
 def save_password(config, password):
-    if password:
+    """False when the system has no credential manager (docker), there the password comes from the environment"""
+
+    if not password:
+        return True
+
+    try:
         keyring.set_password(KEYRING_SERVICE, get_account(config), password)
+        return True
+    except Exception as e:
+        console.log(f"[yellow]NAS: password non salvata ({e})")
+        return False
 
 def delete_password(config):
     try:

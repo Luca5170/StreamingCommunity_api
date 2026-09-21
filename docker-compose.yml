@@ -1,0 +1,31 @@
+services:
+  sc-downloader:
+    build: .
+    image: sc-downloader
+    container_name: sc-downloader
+    restart: unless-stopped
+
+    ports:
+      # The app, open it from the pc or from the phone: http://<indirizzo del pc>:8770
+      - "8770:8770"
+
+    # Molti provider italiani bloccano il sito nei loro DNS: il container ne usa di pubblici
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+
+    volumes:
+      # Videos, download da riprendere, impostazioni e cronologia: tutto qui, resta anche se ricrei il container
+      - ./data:/data
+
+      # Per salvare i film direttamente in una cartella del pc, togli il commento e cambia il percorso
+      # - D:/Film:/data/videos
+
+    environment:
+      - TZ=Europe/Rome
+
+      # Indirizzo mostrato nel QR code delle impostazioni (dentro il container non si vede quello vero)
+      # - SC_ADDRESS=http://192.168.1.23:8770
+
+      # Password del NAS: nel container non c'è la gestione credenziali di Windows
+      # - SC_NAS_PASSWORD=la-tua-password

@@ -1,0 +1,32 @@
+# Only the code goes in the image, the rest stays out
+
+.git
+.gitignore
+.claude
+.idea
+venv
+__pycache__
+**/__pycache__
+*.pyc
+
+# State and files of this pc
+data/
+videos/
+tmp/
+logs/
+data.json
+nas.json
+nas_known_hosts
+history.json
+downloads.json
+remote.json
+sc_downloader.lock
+sc_downloader.instance.json
+*.bak
+*.tmp
+debug.log
+
+# Windows launcher and copy of the upstream project
+SC Downloader.bat
+VibraVid-*/
+README.md

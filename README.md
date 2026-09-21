@@ -46,6 +46,17 @@ If the nas does not answer the download is never lost: the file stays in `videos
 ## Use it from the phone
 While the program is open on the pc, every device of the same Wi-Fi can use it at `http://<address of the pc>:8770`: the address and a QR code to scan are in the settings, tab Telefono. Devices outside the home network are refused. The first time Windows asks to allow python on the network: choose private networks.
 
+## Docker
+```bash
+docker compose up -d --build
+```
+Then open `http://<address of the pc>:8770`. Everything the program writes (videos, downloads to resume, settings, history) stays in `./data`, so the container can be recreated without losing anything.
+
+- The compose file sets public dns (1.1.1.1, 8.8.8.8): many italian providers block the site in their own dns and inside the container it would not be reachable.
+- `SC_ADDRESS` is the address shown in the qr code of the settings: inside the container the address of the pc is not visible.
+- `SC_NAS_PASSWORD` is the password of the nas: the container has no credential manager, so it is given from outside (also with a docker secret or an `.env` file).
+- To save the films directly in a folder of the pc, map it on `/data/videos`.
+
 ## Auto Update
 Keep your script up to date with the latest features by running:
 ```python
