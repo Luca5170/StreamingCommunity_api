@@ -11,12 +11,13 @@ from Src.Api.vixcloud import parse_content, get_playlist, get_master_playlist, g
 
 # General import
 import json, os, threading
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 import requests
 from bs4 import BeautifulSoup
 
 # Variable
-BASE_URL = "https://www.animeunity.so"
+# The site changes address from time to time, the old ones (.to, .it) send to the new one
+DOMAINS = ("https://www.animeunity.co", "https://www.animeunity.to", "https://www.animeunity.it")
 EPISODES_PAGE = 120     # The site gives at most 120 episodes for every request
 
 
@@ -26,31 +27,52 @@ class AnimeUnity:
     def __init__(self):
         self.lock = threading.Lock()
         self.session = None
+        self.base_url = DOMAINS[0]
 
     def open(self):
-        session = requests.Session()
-        session.headers.update({'user-agent': get_headers(), 'referer': f"{BASE_URL}/"})
+        """The address that answers last time first, then the others, following where they send"""
 
-        response = http.get(BASE_URL, session=session, timeout=15)
-        response.raise_for_status()
+        error = None
 
-        session.headers['x-xsrf-token'] = unquote(session.cookies.get('XSRF-TOKEN', ''))
-        self.session = session
+        for base_url in dict.fromkeys((self.base_url, *DOMAINS)):
+            session = requests.Session()
+            session.headers['user-agent'] = get_headers()
+
+            try:
+                response = http.get(base_url, session=session, timeout=15)
+                response.raise_for_status()
+            except requests.RequestException as e:
+                error = e
+                continue
+
+            address = urlsplit(response.url)
+            self.base_url = f"{address.scheme}://{address.netloc}"
+
+            session.headers['referer'] = f"{self.base_url}/"
+            session.headers['x-xsrf-token'] = unquote(session.cookies.get('XSRF-TOKEN', ''))
+            self.session = session
+            return
+
+        raise error
 
     def request(self, method, path, **kwargs):
         with self.lock:
             if self.session is None:
                 self.open()
-            session = self.session
+            session, base_url = self.session, self.base_url
 
-        response = http.request(method, f"{BASE_URL}{path}", session=session, **kwargs)
+        try:
+            response = http.request(method, f"{base_url}{path}", session=session, **kwargs)
+        except requests.ConnectionError:
+            # The address may be gone while the program is open, the others are tried
+            response = None
 
         # Laravel answers 419 when the token of the session is expired
-        if response.status_code in (401, 419):
+        if response is None or response.status_code in (401, 419):
             with self.lock:
                 self.open()
-                session = self.session
-            response = http.request(method, f"{BASE_URL}{path}", session=session, **kwargs)
+                session, base_url = self.session, self.base_url
+            response = http.request(method, f"{base_url}{path}", session=session, **kwargs)
 
         response.raise_for_status()
         return response
