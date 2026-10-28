@@ -1086,7 +1086,7 @@ function detailBody(detail) {
       h('div', {},
         plot,
         more,
-        detail.type === 'tv' ? null : h('div', { class: 'detail-actions' }, movieButton(detail), previewButton(() => openPreview(detail)))),
+        detail.type === 'tv' ? null : h('div', { class: 'detail-actions' }, movieButton(detail), watchButton(() => openPlayer(detail)))),
       credits.length ? h('dl', { class: 'credits' }, credits) : null),
     detail.type === 'tv' ? h('section', { class: 'seasons', id: 'seasons', 'aria-label': 'Episodi' }) : null,
     detail.related?.length ? h('section', { class: 'related', 'aria-label': 'Correlati' },
@@ -1124,13 +1124,15 @@ function updateMovieButton(button, detail) {
   }
 }
 
-/* ---------- Preview ---------- */
+/* ---------- Player ---------- */
 
 const AUDIO_NAMES = { ita: 'italiano', jpn: 'giapponese', eng: 'inglese' };
-let previewRequest = 0;
+let playerRequest = 0;
+let hlsPlayer = null;
+let hlsLibrary = null;
 
-function previewButton(onclick, size = '') {
-  return h('button', { class: `button ghost${size ? ` ${size}` : ''}`, type: 'button', onclick }, icon('play'), 'Anteprima');
+function watchButton(onclick, size = '', id = null) {
+  return h('button', { class: `button ghost${size ? ` ${size}` : ''}`, type: 'button', id, onclick }, icon('play'), h('span', {}, 'Guarda'));
 }
 
 function clock(seconds) {
@@ -1140,63 +1142,140 @@ function clock(seconds) {
   return hours ? `${hours}:${String(minutes).padStart(2, '0')}:${rest}` : `${minutes}:${rest}`;
 }
 
-function previewEpisode() {
+function episodeToWatch() {
   const episodes = Array.isArray(state.episodes) ? state.episodes : [];
 
   // The first selected episode, or the first of the list
-  const episode = episodes.find((item) => state.selected.has(item.id)) || episodes[0];
-  if (episode && state.detail) openPreview(state.detail, episode);
+  return episodes.find((item) => state.selected.has(item.id)) || episodes[0];
 }
 
-async function openPreview(title, episode = null) {
-  const requestId = ++previewRequest;
-  const layer = $('#preview');
-  const stage = $('#preview-stage');
+function watchEpisode() {
+  const episode = episodeToWatch();
+  if (episode && state.detail) openPlayer(state.detail, episode);
+}
 
-  $('#preview-title').textContent = episode ? `${title.name} · Episodio ${episode.number}` : title.name;
-  $('#preview-meta').textContent = 'Qualche minuto da metà video, nella stessa qualità del download';
-  stage.replaceChildren(h('div', { class: 'preview-wait', role: 'status' },
-    h('span', { class: 'preview-spinner', 'aria-hidden': 'true' }),
-    h('strong', {}, 'Preparo l’anteprima…'),
-    h('span', {}, 'Ci vogliono circa 20 secondi')));
+function nextEpisode(title, episode) {
+  if (!episode || state.detail !== title || !Array.isArray(state.episodes)) return null;
+
+  const index = state.episodes.findIndex((item) => item.id === episode.id);
+  return index >= 0 ? state.episodes[index + 1] || null : null;
+}
+
+function loadHls() {
+  // The library is big, it is loaded the first time a video is watched
+  hlsLibrary ||= new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = '/vendor/hls.min.js';
+    script.onload = () => resolve(window.Hls);
+    script.onerror = () => {
+      hlsLibrary = null;
+      script.remove();
+      reject(new Error('Il lettore video non si è caricato, riprova'));
+    };
+    document.head.append(script);
+  });
+
+  return hlsLibrary;
+}
+
+async function openPlayer(title, episode = null, startAt = 0) {
+  const requestId = ++playerRequest;
+  const layer = $('#player');
+  const stage = $('#player-stage');
+  const next = nextEpisode(title, episode);
+  const nextButton = $('#player-next');
+
+  stopVideo();
+  $('#player-title').textContent = episode ? `${title.name} · Episodio ${episode.number}` : title.name;
+  $('#player-meta').textContent = 'Nella stessa qualità del download';
+  nextButton.hidden = !next;
+  nextButton.onclick = next ? () => openPlayer(title, next) : null;
+  stage.replaceChildren(h('div', { class: 'player-wait', role: 'status' },
+    h('span', { class: 'spinner', 'aria-hidden': 'true' }),
+    h('strong', {}, 'Preparo il video…'),
+    h('span', {}, 'Qualche secondo')));
   openLayer(layer);
 
   const params = new URLSearchParams({ source: title.source || 'sc', id: title.id, type: title.type });
   if (episode) params.set('episode_id', episode.id);
 
+  const showError = (error, video = null) => {
+    if (requestId !== playerRequest || !layers.includes(layer)) return;
+
+    // Trying again starts from where the video stopped
+    const position = video?.currentTime || startAt;
+    stopVideo();
+    stage.replaceChildren(errorState(error, () => openPlayer(title, episode, position)));
+  };
+
   try {
-    const result = await api(`/api/preview?${params}`);
-    if (requestId !== previewRequest || !layers.includes(layer)) return;
+    const [result, Hls] = await Promise.all([api(`/api/stream?${params}`), loadHls()]);
+    if (requestId !== playerRequest || !layers.includes(layer)) return;
 
     // Anime have the audio inside the video: dubbed copies are in italian, the others in japanese with subtitles
     const code = result.language || (isAnime(title) ? (title.dub ? 'ita' : 'jpn') : null);
     const language = AUDIO_NAMES[code] || code;
-    $('#preview-meta').textContent = [
+    $('#player-meta').textContent = [
       result.quality,
       language ? `Audio ${language}` : null,
       isAnime(title) && code !== 'ita' ? 'sottotitoli in italiano' : null,
-      `da ${clock(result.start)} a ${clock(result.start + result.length)} di ${clock(result.total)}`,
+      result.duration ? clock(result.duration) : null,
     ].filter(Boolean).join(' · ');
 
-    const video = h('video', { src: result.url, controls: true, autoplay: true, playsinline: true, preload: 'auto' });
+    const video = h('video', { controls: true, autoplay: true, playsinline: true });
+    if (next) video.addEventListener('ended', () => openPlayer(title, next));
     stage.replaceChildren(video);
+
+    if (Hls?.isSupported()) {
+      hlsPlayer = new Hls({ startPosition: startAt || -1, maxBufferLength: 60 });
+      let recovered = false;
+
+      hlsPlayer.on(Hls.Events.ERROR, (event, data) => {
+        if (!data.fatal) return;
+
+        // A broken piece of video is skipped once, after that the error is shown
+        if (data.type === Hls.ErrorTypes.MEDIA_ERROR && !recovered) {
+          recovered = true;
+          hlsPlayer.recoverMediaError();
+          return;
+        }
+
+        showError(new Error('Lo streaming si è interrotto: il sito non manda più il video'), video);
+      });
+
+      hlsPlayer.loadSource(result.url);
+      hlsPlayer.attachMedia(video);
+    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      // Safari of old iPhones plays the playlist by itself
+      video.addEventListener('loadedmetadata', () => { if (startAt) video.currentTime = startAt; }, { once: true });
+      video.addEventListener('error', () => showError(new Error('Lo streaming si è interrotto: il sito non manda più il video'), video));
+      video.src = result.url;
+    } else {
+      throw new Error('Questo browser non riesce a riprodurre lo streaming');
+    }
+
     video.focus({ preventScroll: true });
   } catch (error) {
-    if (requestId !== previewRequest || !layers.includes(layer)) return;
-    stage.replaceChildren(errorState(error, () => openPreview(title, episode)));
+    showError(error);
   }
 }
 
-function stopPreview() {
-  previewRequest += 1;
+function stopVideo() {
+  hlsPlayer?.destroy();
+  hlsPlayer = null;
 
-  // Without its source the video stops asking the file
-  const video = $('#preview-stage video');
+  // Without its source the video stops asking the segments, also when it is no longer on the page
+  const video = $('#player-stage video');
   if (video) {
     video.pause();
     video.removeAttribute('src');
     video.load();
   }
+}
+
+function stopPlayer() {
+  playerRequest += 1;
+  stopVideo();
 }
 
 /* ---------- Seasons and episodes ---------- */
@@ -1293,7 +1372,7 @@ function episodesToolbar() {
   return h('div', { class: 'toolbar' },
     h('button', { class: 'button ghost small', type: 'button', id: 'select-all', onclick: toggleAllEpisodes }, 'Seleziona tutti'),
     h('button', { class: 'button primary small', type: 'button', id: 'download-selected', onclick: queueSelectedEpisodes }, icon('download'), h('span', {}, 'Scarica')),
-    previewButton(previewEpisode, 'small'),
+    watchButton(watchEpisode, 'small', 'watch-episode'),
     h('span', { class: 'toolbar-count', id: 'selection-count', 'aria-live': 'polite' }));
 }
 
@@ -1344,6 +1423,11 @@ function updateSelection() {
     button.disabled = !count;
     $('span', button).textContent = count ? `Scarica ${plural(count, 'episodio', 'episodi')}` : 'Scarica';
   }
+
+  // Which episode starts, the first selected or the first of the list
+  const watch = $('#watch-episode');
+  const episode = episodeToWatch();
+  if (watch && episode) $('span', watch).textContent = `Guarda ep. ${episode.number}`;
 }
 
 function toggleAllEpisodes() {
@@ -1841,7 +1925,7 @@ function bindEvents() {
   $('#nas-test').addEventListener('click', testNas);
   $$('.settings-tabs .tab').forEach((tab) => tab.addEventListener('click', () => showSettingsPanel(tab.dataset.panel)));
   $$('#category-switch .category').forEach((button) => button.addEventListener('click', () => setCategory(button.dataset.category)));
-  $('#preview').addEventListener('layerclose', stopPreview);
+  $('#player').addEventListener('layerclose', stopPlayer);
   $('#detail').addEventListener('layerclose', () => {
     state.detailId += 1;
     state.detail = null;

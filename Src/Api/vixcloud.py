@@ -84,7 +84,7 @@ def get_m3u8_key(m3u8_url):
     return req.content.hex()
 
 def get_stream(embed_content):
-    """Video with the best quality, audio and key of a player, used by the preview"""
+    """Video with the best quality, audio and key of a player, used by the streaming of the app"""
 
     master_playlist = get_master_playlist(get_playlist(parse_content(embed_content)))
 
@@ -100,5 +100,7 @@ def get_stream(embed_content):
         'audio': audio_url,
         'key': get_m3u8_key(best.uri),
         'resolution': best.stream_info.resolution,
+        'bandwidth': best.stream_info.bandwidth,
+        'codecs': best.stream_info.codecs,
         'language': audio.language if audio else None,
     }

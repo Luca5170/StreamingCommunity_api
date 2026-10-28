@@ -7,7 +7,7 @@ from Src.Gui.anime_source import AnimeSource
 from Src.Gui import instance, remote
 from Src.Gui.recommend import Recommender
 from Src.Gui.anime_recommend import AnimeRecommender
-from Src.Lib.FFmpeg import preview
+from Src.Gui.player import Streams
 from Src.Lib.Nas import nas
 from Src.Util import history, storage
 from Src.Util.cancel import DownloadCancelled
@@ -694,8 +694,7 @@ class App:
         self.downloads = DownloadManager(self.site)
         self.recommender = Recommender(self.site, format_title)
         self.anime_recommender = AnimeRecommender()
-        self.previews = {}
-        self.preview_lock = threading.Lock()
+        self.streams = Streams()
         self.remote_server = None
         self.remote_lock = threading.Lock()
         self.server = None
@@ -844,8 +843,8 @@ class App:
 
         return self.anime.episodes(anime_id, start, end)
 
-    def preview(self, query, body):
-        """A few minutes from the middle of a film or an episode, to see and hear its quality before the download"""
+    def stream(self, query, body):
+        """The whole film or episode to watch in the app, in the same quality of the download"""
 
         source = 'anime' if query.get('source') == 'anime' else 'sc'
         title_id = parse_int(query.get('id'), 'id')
@@ -856,25 +855,15 @@ class App:
         if source == 'sc' and query.get('type') == 'tv' and episode_id is None:
             raise ApiError("Parametro non valido: episode_id")
 
-        cache_id = (source, title_id, episode_id)
+        stream = self.streams.open(get_stream(self.get_player(source, title_id, episode_id)))
+        width, height = stream.resolution or (0, 0)
 
-        # One preview at a time, the second request of the same title finds it ready
-        with self.preview_lock:
-            ready = self.previews.get(cache_id)
-            if ready and preview.get_path(ready['name']):
-                return ready
-
-            stream = get_stream(self.get_player(source, title_id, episode_id))
-            result = preview.make_preview(stream['video'], stream['audio'], stream['key'], cache_id)
-
-            width, height = stream['resolution'] or (0, 0)
-            result.update({
-                'url': f"/api/preview/file?name={result['name']}",
-                'quality': f"{height}p" if height else None,
-                'language': stream['language'],
-            })
-            self.previews[cache_id] = result
-            return result
+        return {
+            'url': f"/api/stream/{stream.id}/master.m3u8",
+            'quality': f"{height}p" if height else None,
+            'language': stream.language,
+            'duration': round(stream.duration),
+        }
 
     def get_player(self, source, title_id, episode_id):
         """Script of the vixcloud player of a film or an episode"""
@@ -973,7 +962,7 @@ ROUTES = {
     ('GET', '/api/anime/title'): App.anime_title,
     ('GET', '/api/anime/episodes'): App.anime_episodes,
     ('GET', '/api/anime/recommendations'): App.anime_recommendations,
-    ('GET', '/api/preview'): App.preview,
+    ('GET', '/api/stream'): App.stream,
     ('GET', '/api/downloads'): App.list_downloads,
     ('POST', '/api/downloads'): App.add_downloads,
     ('POST', '/api/downloads/remove'): App.remove_download,
@@ -1015,10 +1004,9 @@ class Handler(BaseHTTPRequestHandler):
         if method == 'GET' and not url.path.startswith('/api/'):
             return self.send_static(url.path)
 
-        # The video of the preview is sent in pieces, the player asks the part it needs
-        if method == 'GET' and url.path == '/api/preview/file':
-            path = preview.get_path(parse_qs(url.query).get('name', [''])[0])
-            return self.send_video(path) if path else self.send_json({'error': "Anteprima non trovata"}, 404)
+        # The video watched in the app, the player asks its playlists and then the segments one by one
+        if method == 'GET' and url.path.startswith('/api/stream/'):
+            return self.send_stream(url.path)
 
         route = ROUTES.get((method, url.path))
         if route is None:
@@ -1098,42 +1086,29 @@ class Handler(BaseHTTPRequestHandler):
         with open(file_path, 'rb') as file:
             self.send_body(file.read(), CONTENT_TYPES[extension])
 
-    def send_video(self, path):
-        size = os.path.getsize(path)
-        start, end = 0, size - 1
-        match = re.fullmatch(r'bytes=(\d*)-(\d*)', self.headers.get('Range', '').strip())
+    def send_stream(self, path):
+        match = re.fullmatch(r'/api/stream/([0-9a-f]{16})/(?:(master|video|audio)\.m3u8|(video|audio)/(\d+)\.ts)', path)
+        stream = self.server.app.streams.get(match.group(1)) if match else None
 
-        if match and (match.group(1) or match.group(2)):
-            if match.group(1):
-                start = int(match.group(1))
-                end = min(int(match.group(2)), size - 1) if match.group(2) else size - 1
-            else:
-                start = max(0, size - int(match.group(2)))
+        if stream is None:
+            return self.send_json({'error': "Video non trovato, riaprilo"}, 404)
 
-            if start > end:
-                self.send_response(416)
-                self.send_header('Content-Range', f'bytes */{size}')
-                self.end_headers()
-                return
+        if match.group(2):
+            text = stream.master() if match.group(2) == 'master' else stream.playlist(match.group(2))
+            if text is None:
+                return self.send_json({'error': "Traccia non trovata"}, 404)
+            return self.send_body(text.encode('utf-8'), 'application/vnd.apple.mpegurl')
 
-        self.send_response(206 if match else 200)
-        self.send_header('Content-Type', 'video/mp4')
-        self.send_header('Accept-Ranges', 'bytes')
-        self.send_header('Content-Length', str(end - start + 1))
-        if match:
-            self.send_header('Content-Range', f'bytes {start}-{end}/{size}')
-        self.send_header('Cache-Control', 'no-store')
-        self.end_headers()
+        # The player asks again by itself the segments that fail
+        try:
+            data = stream.segment(match.group(3), int(match.group(4)))
+        except ConnectionError as e:
+            return self.send_json({'error': str(e)}, 502)
 
-        with open(path, 'rb') as file:
-            file.seek(start)
-            remaining = end - start + 1
-            while remaining > 0:
-                chunk = file.read(min(1024 * 1024, remaining))
-                if not chunk:
-                    break
-                self.wfile.write(chunk)
-                remaining -= len(chunk)
+        if data is None:
+            return self.send_json({'error': "Segmento non trovato"}, 404)
+
+        self.send_body(data, 'video/mp2t')
 
     def send_json(self, data, status=200):
         self.send_body(json.dumps(data).encode('utf-8'), 'application/json; charset=utf-8', status)
@@ -1181,6 +1156,7 @@ def clean_temp():
     only the ones not touched for days (downloads removed from the list) are deleted.
     """
 
+    # The preview folder is left by the old versions
     for folder in (os.path.join("tmp", "output"), os.path.join("tmp", "preview")):
         remove_folder(folder)
 

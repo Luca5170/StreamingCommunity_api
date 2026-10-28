@@ -2211,14 +2211,14 @@ a {
   display: none;
 }
 
-/* ---------- Preview ---------- */
+/* ---------- Player ---------- */
 
 .sheet-video {
   width: min(1180px, 100%);
   padding: 22px 24px 24px;
 }
 
-.preview-head {
+.player-head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -2226,18 +2226,25 @@ a {
   margin-bottom: 18px;
 }
 
-.preview-head h2 {
+.player-head h2 {
   margin: 4px 0 6px;
   font-size: clamp(20px, 2.4vw, 28px);
 }
 
-.preview-meta {
+.player-meta {
   margin: 0;
   color: var(--muted);
   font-size: 14px;
 }
 
-.preview-stage {
+.player-actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.player-stage {
   position: relative;
   display: grid;
   place-items: center;
@@ -2252,13 +2259,13 @@ a {
   background: #000;
 }
 
-.preview-stage video {
+.player-stage video {
   width: 100%;
   height: 100%;
   background: #000;
 }
 
-.preview-wait {
+.player-wait {
   display: grid;
   justify-items: center;
   gap: 14px;
@@ -2267,12 +2274,12 @@ a {
   text-align: center;
 }
 
-.preview-wait strong {
+.player-wait strong {
   color: var(--text);
   font-size: 17px;
 }
 
-.preview-spinner {
+.spinner {
   width: 42px;
   height: 42px;
   border: 3px solid rgba(255, 255, 255, 0.15);
@@ -2704,6 +2711,25 @@ a {
 
   .search {
     min-width: 0;
+  }
+
+  /* The title keeps the whole width next to the close button, the next episode goes under it */
+  .player-head {
+    flex-wrap: wrap;
+    row-gap: 12px;
+  }
+
+  .player-head > div:first-child {
+    flex: 1 1 calc(100% - 60px);
+    min-width: 0;
+  }
+
+  .player-actions {
+    display: contents;
+  }
+
+  #player-next {
+    order: 1;
   }
 
   .search input {
