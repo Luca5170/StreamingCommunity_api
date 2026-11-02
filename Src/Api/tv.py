@@ -3,13 +3,13 @@
 # Class import
 from Src.Util.headers import get_headers
 from Src.Util.console import console, msg
-from Src.Util.errors import DownloadError
-from Src.Util import http
+from Src.Util.errors import DownloadError, describe_response, step
+from Src.Util import http, videos
 from Src.Lib.FFmpeg.my_m3u8 import download_m3u8
 from Src.Lib.Nas.nas import finalize
 from Src.Api.page import get_base_url, get_page_props, get_title
 from Src.Api.film import get_player_script
-from Src.Api.vixcloud import parse_content, get_playlist, get_master_playlist, get_m3u8_url, get_m3u8_audio, get_m3u8_key
+from Src.Api.vixcloud import parse_content, get_playlist, get_master_playlist, get_m3u8_url, get_m3u8_audio, get_m3u8_key, get_subtitles
 
 # General import
 import requests, os, sys
@@ -19,11 +19,13 @@ from bs4 import BeautifulSoup
 # [func]
 def get_token(id_tv, domain):
     session = requests.Session()
-    http.get(f"{get_base_url(domain)}/watch/{id_tv}", session=session, headers={'user-agent': get_headers()})
+    response = http.get(f"{get_base_url(domain)}/watch/{id_tv}", session=session, headers={'user-agent': get_headers()})
 
     token = session.cookies.get('XSRF-TOKEN')
+    if not token and not response.ok:
+        raise DownloadError(describe_response(response, "Il sito"), retry=response.status_code not in (404, 410))
     if not token:
-        raise DownloadError("Il sito non ha dato il permesso di guardare l'episodio, riprova")
+        raise DownloadError("Il sito non ha dato il permesso di guardare l'episodio (manca il token della sessione), riprova")
 
     return token
 
@@ -60,11 +62,11 @@ def get_iframe(tv_id, ep_id, domain, token):
 
     if not req.ok:
         # A title that is not on the site is not there also at the next attempt
-        raise DownloadError(f"Il sito ha risposto con errore {req.status_code}", retry=req.status_code not in (404, 410))
+        raise DownloadError(describe_response(req, "Il sito"), retry=req.status_code not in (404, 410))
 
     iframe = BeautifulSoup(req.text, "lxml").find("iframe")
     if iframe is None or not iframe.get("src"):
-        raise DownloadError("Episodio non disponibile sul sito", retry=False)
+        raise DownloadError("La pagina dell'episodio non contiene il player: l'episodio non è disponibile sul sito", retry=False)
 
     return get_player_script(iframe.get("src"))
 
@@ -76,28 +78,32 @@ def dw_single_ep(tv_id, eps, index_ep_select, domain, token, tv_name, season_sel
 
     if media != None:
         media = {**media, 'season': season_select, 'episode_number': eps[index_ep_select]['n'], 'episode_name': eps[index_ep_select]['name']}
-    embed_content = get_iframe(tv_id, eps[index_ep_select]['id'], domain, token)
-    json_win_param = parse_content(embed_content)
+    with step("Ricerca dell'episodio sul sito"):
+        embed_content = get_iframe(tv_id, eps[index_ep_select]['id'], domain, token)
 
-    m3u8_playlist = get_playlist(json_win_param)
-    master_playlist = get_master_playlist(m3u8_playlist)
+    with step("Lettura del player"):
+        json_win_param = parse_content(embed_content)
 
-    m3u8_url = get_m3u8_url(master_playlist)
-    m3u8_key = get_m3u8_key(m3u8_url)
+        m3u8_playlist = get_playlist(json_win_param)
+        master_playlist = get_master_playlist(m3u8_playlist)
+
+        m3u8_url = get_m3u8_url(master_playlist)
+        m3u8_key = get_m3u8_key(m3u8_url)
 
     mp4_name = f"{tv_name.replace('+', '_')}_S{str(season_select).zfill(2)}E{str(index_ep_select+1).zfill(2)}"
     mp4_format = f"{mp4_name}.mp4"
-    mp4_path = os.path.join("videos",tv_name, mp4_format)
+    mp4_path = os.path.join(videos.get_folder(), tv_name, mp4_format)
 
     m3u8_url_audio = get_m3u8_audio(master_playlist)
 
     if m3u8_url_audio != None:
         console.print("[blue]Use m3u8 audio => [red]True")
 
-    download_m3u8(m3u8_index=m3u8_url, m3u8_audio=m3u8_url_audio, m3u8_subtitle=m3u8_playlist, key=m3u8_key, output_filename=mp4_path, progress_callback=progress_callback)
+    download_m3u8(m3u8_index=m3u8_url, m3u8_audio=m3u8_url_audio, subtitles=get_subtitles(master_playlist), key=m3u8_key, output_filename=mp4_path, progress_callback=progress_callback)
 
     # Rename the file and move it to the nas if it is enabled
-    return finalize(mp4_path, media, progress_callback)
+    with step("Salvataggio del file"):
+        return finalize(mp4_path, media, progress_callback)
     
 def main_dw_tv(tv_id, tv_name, version, domain, media=None):
 

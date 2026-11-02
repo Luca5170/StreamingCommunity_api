@@ -5,7 +5,7 @@ from Src.Api import anime
 from Src.Gui.anime_source import format_anime
 from Src.Gui.recommend import normalize, parse_name
 from Src.Lib.Nas import nas
-from Src.Util import history
+from Src.Util import history, videos
 from Src.Util.console import console
 
 # General import
@@ -48,12 +48,13 @@ def get_past():
     return [title for title in history.load()['titles'] if title.get('source') == 'anime']
 
 def list_downloads():
-    """Anime already downloaded: folders with the slug in videos/anime, folders 'Name (Year)' on the nas"""
+    """Anime already downloaded: folders with the slug in the anime folder of the videos, folders 'Name (Year)' on the nas"""
 
     found = []
+    folder = os.path.join(videos.get_folder(), "anime")
 
-    if os.path.isdir(os.path.join("videos", "anime")):
-        for entry in os.scandir(os.path.join("videos", "anime")):
+    if os.path.isdir(folder):
+        for entry in os.scandir(folder):
             if entry.is_dir() and not entry.name.startswith('.'):
                 found.append({**parse_name(entry.name), 'date': entry.stat().st_mtime})
 
@@ -92,7 +93,7 @@ def find_anime(item):
 
 def has_sources():
     config = nas.load_config()
-    return os.path.isdir(os.path.join("videos", "anime")) or bool(nas.is_enabled(config) and config.get('anime_path'))
+    return os.path.isdir(os.path.join(videos.get_folder(), "anime")) or bool(nas.is_enabled(config) and config.get('anime_path'))
 
 def import_downloads():
     """At the first start the past anime are taken from the names of the folders"""

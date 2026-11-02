@@ -55,7 +55,7 @@ Then open `http://<address of the pc>:8770`. Everything the program writes (vide
 - The compose file sets public dns (1.1.1.1, 8.8.8.8): many italian providers block the site in their own dns and inside the container it would not be reachable.
 - `SC_ADDRESS` is the address shown in the qr code of the settings: inside the container the address of the pc is not visible.
 - `SC_NAS_PASSWORD` is the password of the nas: the container has no credential manager, so it is given from outside (also with a docker secret or an `.env` file).
-- To save the films directly in a folder of the pc, map it on `/data/videos`.
+- To save the films directly in a folder of the pc, map it on `/data/videos`. With another name (`E:/Film:/data/film`) it can be chosen in the settings, tab Download, by writing `/data/film`.
 
 ## Auto Update
 Keep your script up to date with the latest features by running:
@@ -68,7 +68,9 @@ python update.py
 
 - Download Specific Episodes or Entire Series: Seamlessly retrieve specific episodes or entire series using intuitive commands. Specify a range of episodes with square brackets notation, e.g., [5-7], or download all episodes with an asterisk (*).
 
-- Download Subtitles: Automatically fetch subtitles if available for downloaded content. (Note: To disable this feature, navigate to ".\Src\Lib\FFmpeg\my_m3u8" and change 'DOWNLOAD_SUB' to False in the configuration file.)
+- Subtitles: The subtitles of the site go inside the video. With the italian audio the forced track, the foreign lines of a dubbed film, is shown by itself: a title without it gets no subtitle tracks, the player would show all the lines. In the app every track is in the menu of the player.
+
+- Download Folder: The folder of the videos can be changed in the settings, tab Download. It is saved in `videos.json`.
 
 - Sync Audio and Video: Ensure perfect synchronization between audio and video during the download process for an enhanced viewing experience.
 

@@ -12,6 +12,7 @@ from Src.Upload.update import main_update
 from Src.Lib.FFmpeg.installer import check_ffmpeg
 
 from Src.Util.errors import DownloadError, describe
+from Src.Util.log import log_error
 
 # Import
 import os, sys
@@ -51,6 +52,7 @@ def download_title(selected_title, site_version, domain):
 
     except (DownloadError, OSError) as e:
         console.print(f"[red]Download non riuscito: {describe(e)}")
+        log_error(f"Download failed ({selected_title['name']})", e)
         return
 
     # Used by the recommendations of the gui

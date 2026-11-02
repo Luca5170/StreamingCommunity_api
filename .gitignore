@@ -21,7 +21,9 @@ debug.log
 # Nas settings and download history of this pc
 nas.json
 nas_known_hosts
+nas_password
 history.json
+progress.json
 
 # State of the program on this pc: queue of the downloads, error log, lock of the open program
 downloads.json
@@ -32,6 +34,15 @@ sc_downloader.instance.json
 *.tmp
 
 remote.json
+videos.json
+
+# Torrent settings and list of this pc, password of the web ui of qbittorrent in docker
+torrent.json
+torrents.json
+torrent_password
 
 # Dati del container docker
 data/
+
+# Password del NAS per docker compose
+.env

@@ -7,18 +7,21 @@ from Src.Gui.anime_source import AnimeSource
 from Src.Gui import instance, remote
 from Src.Gui.recommend import Recommender
 from Src.Gui.anime_recommend import AnimeRecommender
+from Src.Gui.torrents import TorrentManager
 from Src.Gui.player import Streams
 from Src.Lib.Nas import nas
-from Src.Util import history, storage
+from Src.Lib.Torrent import config as torrent_config, jackett, plugins, qbittorrent
+from Src.Util import history, storage, videos
+from Src.Util import progress as watch_progress
 from Src.Util.cancel import DownloadCancelled
-from Src.Util.errors import DownloadError, describe, is_disk_full, is_network_error, is_online
+from Src.Util.errors import AppError, DownloadError, describe, is_disk_full, is_online, step
 from Src.Util.log import log_error
 from Src.Util.console import console
 from Src.Api.vixcloud import get_stream
 from Src.Util.os import remove_folder
 
 # General import
-import argparse, itertools, json, os, queue, re, shutil, subprocess, sys, threading, time, webbrowser
+import argparse, collections, itertools, json, os, queue, re, shutil, subprocess, sys, threading, time, webbrowser
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 import requests
@@ -26,7 +29,6 @@ import requests
 # Variable
 WEB_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 DATA_FILE = "data.json"
-VIDEOS_FOLDER = "videos"
 DEFAULT_PORT = 8765
 JOBS_FILE = "downloads.json"
 MAX_SAVED_JOBS = 300
@@ -37,6 +39,7 @@ MAX_AUTO_UPLOADS = 5
 ADDRESS_ENV = "SC_ADDRESS"          # Address shown in the qr code, used by the docker image
 REMOTE_HOST = '0.0.0.0'             # Every network card of the pc, the key and the private addresses protect it
 SEGMENTS_MAX_AGE = 7 * 24 * 3600    # Segments of a download not resumed for a week are removed
+SPEED_WINDOW = 5                    # Seconds of the speed shown, short enough to follow the changes
 CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
@@ -46,7 +49,7 @@ CONTENT_TYPES = {
 }
 
 
-class ApiError(Exception):
+class ApiError(AppError):
     def __init__(self, message, status=400):
         super().__init__(message)
         self.status = status
@@ -58,7 +61,8 @@ class Site:
 
     def __init__(self):
         self.lock = threading.Lock()
-        self.domain = self.read_data().get('domain', '')
+        # The old versions saved only the extension: it becomes the whole address
+        self.domain = Page.get_host(self.read_data().get('domain', ''))
         self.version = None
 
     def read_data(self):
@@ -68,15 +72,17 @@ class Site:
     def connect(self, domain=None):
         """Get version of the site and save the domain if it works"""
 
-        domain = (self.domain if domain is None else domain).strip().strip('.')
+        domain = Page.get_host(self.domain if domain is None else domain)
 
         if not domain:
-            raise ApiError("Inserisci l'estensione del sito")
+            raise ApiError("Inserisci l'indirizzo del sito")
 
         try:
             version = Page.get_version(domain)
-        except Exception:
-            raise ApiError(f"Impossibile raggiungere {Page.SITE_NAME}.{domain}", 502)
+        except Exception as e:
+            # The reason is shown in the settings: missing domain, blocked by the provider, site moved...
+            console.log(f"[red]Site {domain} not reachable: {e!r}")
+            raise ApiError(describe(e), 502)
 
         with self.lock:
             self.domain, self.version = domain, version
@@ -102,7 +108,7 @@ class Site:
         return {
             'domain': self.domain,
             'site_name': Page.SITE_NAME,
-            'site': f"{Page.SITE_NAME}.{self.domain}" if self.domain else None,
+            'site': self.domain or None,
             'connected': self.version is not None,
             'ffmpeg': shutil.which('ffmpeg') is not None,
             'nas': nas.is_enabled(),
@@ -201,6 +207,55 @@ def read_nas(body):
         'anime_path': str(body.get('anime_path') or '').strip().rstrip('/'),
     }
 
+def read_torrent_config(body, saved):
+    """Torrent settings sent by the gui, the key of jackett and the password are never sent back"""
+
+    values = {key: str(body.get(key) or '').strip() for key in ('jackett_url', 'qbit_url', 'qbit_user', 'save_path', 'after_upload', 'path_from', 'path_to', 'plugins', 'plugins_path')}
+    values['jackett_key'] = str(body.get('jackett_key') or '').strip() or saved['jackett_key']
+
+    # An address written without http
+    for key in ('jackett_url', 'qbit_url'):
+        url = values[key].rstrip('/')
+        values[key] = f"http://{url}" if url and not re.match(r'^https?://', url, re.IGNORECASE) else url
+
+    return {**saved, **values}
+
+def parse_seconds(value, name):
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        raise ApiError(f"Parametro non valido: {name}")
+
+    if not 0 <= seconds < 100 * 3600:
+        raise ApiError(f"Parametro non valido: {name}")
+
+    return seconds
+
+def read_watch_item(item):
+    """A film or an episode watched in the app, with what the row of the home needs to show it"""
+
+    if not isinstance(item, dict):
+        raise ApiError("Video non valido")
+
+    optional_int = lambda key: parse_int(item[key], key) if item.get(key) is not None else None
+    text = lambda key: item[key] if isinstance(item.get(key), str) and item[key] else None
+
+    return {
+        'source': 'anime' if item.get('source') == 'anime' else 'sc',
+        'id': parse_int(item.get('id'), 'id'),
+        'slug': str(item.get('slug') or ''),
+        'name': str(item.get('name') or item.get('slug') or ''),
+        'type': 'tv' if item.get('type') == 'tv' else 'movie',
+        'year': str(item['year'])[:4] if item.get('year') else None,
+        'poster': text('poster'),
+        'backdrop': text('backdrop'),
+        'dub': bool(item.get('dub')),
+        'season': optional_int('season'),
+        'episode_id': optional_int('episode_id'),
+        'episode_number': str(item['episode_number']) if item.get('episode_number') is not None else None,
+        'episode_name': text('episode_name'),
+    }
+
 def parse_slug(value):
 
     # Slug is used in urls and file names
@@ -236,6 +291,7 @@ class DownloadManager:
         self.lock = threading.Lock()
         self.queue = queue.Queue()
         self.next_id = itertools.count(1)
+        self.speeds = {}            # Bytes of the running job along the time, the base of the speed shown
         self.load()
 
         threading.Thread(target=self.worker, daemon=True).start()
@@ -396,7 +452,7 @@ class DownloadManager:
 
         self.save()
         console.print(f"\n[green]GUI download [white]=> [cyan]{job['name']}")
-        progress = lambda stage, done, total: self.update(job, stage, done, total)
+        progress = lambda stage, done, total, received=None: self.update(job, stage, done, total, received)
         output, remote, warning, status, error, retry = None, None, None, 'done', None, False
         upload_only = job['upload_only']
 
@@ -436,6 +492,7 @@ class DownloadManager:
 
         with self.lock:
             user_cancel = job['cancel'] is True
+            self.speeds.pop(job['id'], None)
 
             if status == 'error' and retry and job['attempt'] < len(RETRY_DELAYS) and not job['cancel']:
                 # Tried again later by itself, the segments already saved are kept
@@ -546,21 +603,23 @@ class DownloadManager:
 
         # The site is asked again at every attempt, it could have changed domain version meanwhile
         if self.site.version is None:
-            self.site.connect()
+            with step("Collegamento al sito"):
+                self.site.connect()
 
         domain = self.site.domain
 
         if job['type'] == 'movie':
             return film.main_dw_film(job['title_id'], job['slug'], domain, progress_callback=progress, media=media)
 
-        props = self.site.request(lambda domain, version: tv.get_season(job['title_id'], job['slug'], domain, version, job['season']))
-        episodes = [{'id': ep['id'], 'n': ep['number'], 'name': ep['name']} for ep in props['loadedSeason']['episodes']]
-        index = next((i for i, ep in enumerate(episodes) if ep['id'] == job['episode_id']), None)
+        with step("Ricerca dell'episodio sul sito"):
+            props = self.site.request(lambda domain, version: tv.get_season(job['title_id'], job['slug'], domain, version, job['season']))
+            episodes = [{'id': ep['id'], 'n': ep['number'], 'name': ep['name']} for ep in props['loadedSeason']['episodes']]
+            index = next((i for i, ep in enumerate(episodes) if ep['id'] == job['episode_id']), None)
 
-        if index is None:
-            raise DownloadError("Episodio non trovato sul sito", retry=False)
+            if index is None:
+                raise DownloadError(f"La stagione {job['season']} non contiene più questo episodio", retry=False)
 
-        token = tv.get_token(job['title_id'], domain)
+            token = tv.get_token(job['title_id'], domain)
         self.check_cancel(job)
         return tv.dw_single_ep(job['title_id'], episodes, index, domain, token, job['slug'], job['season'], progress_callback=progress, media=media)
 
@@ -569,17 +628,18 @@ class DownloadManager:
 
         # A film of anime is its first and only episode
         if episode_id is None:
-            episodes = anime.client.get_episodes(job['title_id'], 1, 1)
+            with step("Ricerca del film su AnimeUnity"):
+                episodes = anime.client.get_episodes(job['title_id'], 1, 1)
 
             if not episodes:
-                raise DownloadError("Episodio non trovato sul sito", retry=False)
+                raise DownloadError("AnimeUnity non ha nessun episodio per questo titolo", retry=False)
 
             episode_id, number = int(episodes[0]['id']), str(episodes[0]['number'])
 
         self.check_cancel(job)
         return anime.dw_episode(job['title_id'], job['slug'], episode_id, number, progress_callback=progress, media=media)
 
-    def update(self, job, stage, done, total):
+    def update(self, job, stage, done, total, received=None):
         """Progress of a job, it stops the download when the user cancels it"""
 
         self.check_cancel(job)
@@ -590,6 +650,54 @@ class DownloadManager:
                 job['waiting'] = 'offline' if stage == 'offline' else None
             else:
                 job.update(stage=stage, done=done, total=total)
+                # The upload counts the bytes sent to the nas
+                self.sample_speed(job['id'], stage, done if stage == 'upload' else received)
+
+    def sample_speed(self, job_id, stage, amount):
+        """Bytes moved until now, called with the lock taken"""
+
+        # Joining and merging move nothing on the network
+        if amount is None:
+            self.speeds.pop(job_id, None)
+            return
+
+        now = time.time()
+        speed = self.speeds.get(job_id)
+
+        # Every stage counts its bytes from zero
+        if speed is None or speed['stage'] != stage or amount < speed['samples'][-1][1]:
+            self.speeds[job_id] = {'stage': stage, 'samples': collections.deque([(now, amount)])}
+            return
+
+        samples = speed['samples']
+
+        # The progress arrives many times a second, one sample every half second is enough
+        if len(samples) > 1 and now - samples[-2][0] < 0.5:
+            samples[-1] = (now, amount)
+        else:
+            samples.append((now, amount))
+
+        # The oldest sample kept is the start of the window
+        while len(samples) > 2 and samples[1][0] <= now - SPEED_WINDOW:
+            samples.popleft()
+
+    def get_speed(self, job_id, now):
+        """Bytes per second of the last seconds, None while there is nothing to measure"""
+
+        speed = self.speeds.get(job_id)
+        if speed is None:
+            return None
+
+        (start, first), (end, last) = speed['samples'][0], speed['samples'][-1]
+
+        # Too soon after the start of the stage to tell
+        if now - start < 1:
+            return None
+
+        # A download that does not move goes down to zero by itself
+        if now - end > SPEED_WINDOW:
+            return 0
+        return round((last - first) / (now - start))
 
     def check_cancel(self, job):
         if job['cancel']:
@@ -632,14 +740,17 @@ class DownloadManager:
         return True
 
     def list(self):
+        now = time.time()
+
         with self.lock:
             jobs = [dict(job) for job in self.jobs]
+            speeds = {job['id']: self.get_speed(job['id'], now) for job in jobs if job['status'] == 'running' and not job['waiting']}
 
         # A failed upload can be retried, the file is still here
         enabled = nas.is_enabled()
-        now = time.time()
 
         for job in jobs:
+            job['speed'] = speeds.get(job['id'])
             job['can_upload'] = bool(enabled and (job['warning'] or job['status'] == 'error')
                                      and job['output'] and os.path.isfile(job['output']))
             job['retry_in'] = max(0, round(job['retry_at'] - now)) if job['status'] == 'waiting' and job['retry_at'] else None
@@ -694,6 +805,7 @@ class App:
         self.downloads = DownloadManager(self.site)
         self.recommender = Recommender(self.site, format_title)
         self.anime_recommender = AnimeRecommender()
+        self.torrents = TorrentManager()
         self.streams = Streams()
         self.remote_server = None
         self.remote_lock = threading.Lock()
@@ -714,7 +826,7 @@ class App:
             if self.last_request > closed_at:
                 return
 
-            if any(job['status'] in ACTIVE for job in self.downloads.list()):
+            if any(job['status'] in ACTIVE for job in self.downloads.list()) or self.torrents.is_busy():
                 continue
 
             console.print("[red]GUI closed")
@@ -863,6 +975,12 @@ class App:
             'quality': f"{height}p" if height else None,
             'language': stream.language,
             'duration': round(stream.duration),
+            'subtitles': [{
+                'url': f"/api/stream/{stream.id}/subtitles/{index}.vtt",
+                'label': track['title'],
+                'language': track['language'],
+                'default': track['default'],
+            } for index, track in enumerate(stream.subtitles)],
         }
 
     def get_player(self, source, title_id, episode_id):
@@ -884,6 +1002,28 @@ class App:
             return film.get_iframe(title_id, domain)
 
         return tv.get_iframe(title_id, episode_id, domain, tv.get_token(title_id, domain))
+
+    # [ where the videos have been stopped ]
+    def watch(self, query, body):
+        return watch_progress.view()
+
+    def save_watch(self, query, body):
+        """Position of the video watched now, sent by the player every few seconds and when it closes"""
+
+        item = read_watch_item(body.get('item'))
+        entry = {**item, 'position': parse_seconds(body.get('position'), 'position'), 'duration': parse_seconds(body.get('duration'), 'duration')}
+
+        # The episode after it, proposed in the home when this one is seen to the end
+        following = body.get('next')
+        next_entry = None
+        if isinstance(following, dict) and following.get('episode_id') is not None:
+            next_entry = read_watch_item({**body['item'], 'episode_name': None, **following})
+
+        return watch_progress.view(watch_progress.save(entry, next_entry))
+
+    def dismiss_watch(self, query, body):
+        source = 'anime' if body.get('source') == 'anime' else 'sc'
+        return watch_progress.view(watch_progress.dismiss(source, parse_int(body.get('id'), 'id')))
 
     def list_downloads(self, query, body):
         return {'jobs': self.downloads.list()}
@@ -922,11 +1062,17 @@ class App:
         return self.nas_status(nas.load_config())
 
     def save_nas(self, query, body):
+        before = nas.load_config()
         config = nas.save_config(read_nas(body))
         status = self.nas_status(config)
 
+        # A nas just turned on, or with other folders, has past downloads never imported (the first start could be without nas)
+        where = lambda config: [config[key] for key in ('host', 'port', 'film_path', 'tv_path', 'anime_path')]
+        if nas.is_enabled(config) and not (nas.is_enabled(before) and where(before) == where(config)):
+            history.reset_imported()
+
         if body.get('password') and not nas.save_password(config, str(body['password'])):
-            status['password_error'] = f"Password non salvata: questo sistema non ha una gestione credenziali, usa la variabile {nas.PASSWORD_ENV}"
+            status['password_error'] = f"Password non salvata: non riesco a scriverla, impostala con la variabile {nas.PASSWORD_ENV}"
 
         return status
 
@@ -941,11 +1087,145 @@ class App:
     def nas_status(self, config):
         return {**config, 'password_saved': bool(nas.get_password(config))}
 
+    # [ torrents ]
+    def torrent_status(self, query, body):
+        return self.torrents.status()
+
+    def torrent_search(self, query, body):
+        text = query.get('q', '').strip()
+
+        if not text:
+            raise ApiError("Scrivi cosa cercare")
+
+        category = query.get('cat') if query.get('cat') in jackett.CATEGORIES else 'all'
+        return self.torrents.search(text, category)
+
+    def torrent_list(self, query, body):
+        return {'items': self.torrents.list(), 'status': self.torrents.status()}
+
+    def torrent_item(self, query, body):
+        """A scheda tecnica being made, asked often by the page while it waits"""
+
+        item = self.torrents.touch(parse_int(query.get('id'), 'id'))
+        if item is None:
+            raise ApiError("Questo torrent non c'è più", 404)
+
+        return self.torrents.view(item)
+
+    def torrent_inspect(self, query, body):
+        return self.torrents.inspect(str(body.get('result') or ''), body.get('media'))
+
+    def torrent_download(self, query, body):
+        return {**self.torrents.download(body), 'items': self.torrents.list()}
+
+    def torrent_discard(self, query, body):
+        self.torrents.discard(parse_int(body.get('id'), 'id'))
+        return {'items': self.torrents.list()}
+
+    def torrent_pause(self, query, body):
+        self.torrents.set_paused(parse_int(body.get('id'), 'id'), bool(body.get('paused')))
+        return {'items': self.torrents.list()}
+
+    def torrent_upload(self, query, body):
+        self.torrents.retry_upload(parse_int(body.get('id'), 'id'))
+        return {'items': self.torrents.list()}
+
+    def torrent_open(self, query, body):
+        path = self.torrents.get_folder(parse_int(body.get('id'), 'id'))
+
+        if not path or not os.path.exists(path):
+            raise ApiError("I file di questo torrent non si trovano su questo PC", 404)
+
+        open_in_explorer(path)
+        return {'ok': True}
+
+    def torrent_config(self, query, body):
+        config = torrent_config.load_config()
+        return {**self.torrent_settings(config), **self.plugin_settings(config)}
+
+    def plugin_settings(self, config):
+        """Search plugins of qbittorrent found on this pc"""
+
+        try:
+            folder, engines = plugins.get_engines(config)
+            return {'plugins_folder': folder, 'plugins_found': [engine['name'] for engine in engines.values()], 'plugins_error': None}
+        except AppError as e:
+            return {'plugins_folder': None, 'plugins_found': [], 'plugins_error': str(e)}
+
+    def save_torrent_config(self, query, body):
+        config = torrent_config.save_config(read_torrent_config(body, torrent_config.load_config()))
+        saved = not body.get('qbit_password') or torrent_config.save_password(config, str(body['qbit_password']))
+        settings = self.torrent_settings(config)
+
+        if not saved:
+            settings['password_error'] = "Password non salvata: non riesco a scriverla"
+
+        self.torrents.reset_client()
+        plugins.forget()
+        return {**settings, **self.plugin_settings(config)}
+
+    def test_torrent_config(self, query, body):
+        config = read_torrent_config(body, torrent_config.load_config())
+        result = {'plugins': 0}
+
+        if config['plugins'] != 'off':
+            try:
+                result['plugins'] = len(plugins.get_engines(config)[1])
+            except AppError:
+                pass
+
+        try:
+            result['jackett'] = {'ok': True, 'indexers': jackett.count_indexers(config)}
+        except AppError as e:
+            result['jackett'] = {'ok': False, 'error': str(e)}
+
+        if not config['qbit_url']:
+            result['qbit'] = {'ok': True, 'mode': 'app'}
+            return result
+
+        try:
+            client = qbittorrent.Client(config, str(body.get('qbit_password') or '') or None)
+            result['qbit'] = {'ok': True, 'version': client.version(), 'save_path': client.preferences().get('save_path')}
+        except AppError as e:
+            result['qbit'] = {'ok': False, 'error': str(e)}
+
+        return result
+
+    def torrent_settings(self, config):
+        return {
+            **{key: value for key, value in config.items() if key != 'jackett_key'},
+            'jackett_key_saved': bool(config['jackett_key']),
+            'jackett_key_auto': bool(torrent_config.find_plugin_key()),
+            'password_saved': bool(torrent_config.get_password(config)),
+            'docker': os.path.exists('/.dockerenv'),
+        }
+
     def open_folder(self, query, body):
         output = self.downloads.get_output(parse_int(body['id'], 'id')) if body.get('id') is not None else None
-        os.makedirs(VIDEOS_FOLDER, exist_ok=True)
-        open_in_explorer(output if output and os.path.isfile(output) else VIDEOS_FOLDER)
+        folder = videos.get_folder()
+        os.makedirs(folder, exist_ok=True)
+        open_in_explorer(output if output and os.path.isfile(output) else folder)
         return {'ok': True}
+
+    # [ folder of the videos ]
+    def videos_status(self):
+        return {
+            'path': videos.load_path(),
+            'folder': os.path.abspath(videos.get_folder()),
+            'default': os.path.abspath(videos.DEFAULT_FOLDER),
+            'docker': videos.IN_DOCKER,
+        }
+
+    def videos_config(self, query, body):
+        return self.videos_status()
+
+    def save_videos(self, query, body):
+        try:
+            videos.save_path(body.get('path'))
+        except OSError as e:
+            raise ApiError(f"Non riesco a scrivere in questa cartella: {e.strerror or e}")
+
+        return self.videos_status()
 
 
 ROUTES = {
@@ -963,6 +1243,9 @@ ROUTES = {
     ('GET', '/api/anime/episodes'): App.anime_episodes,
     ('GET', '/api/anime/recommendations'): App.anime_recommendations,
     ('GET', '/api/stream'): App.stream,
+    ('GET', '/api/progress'): App.watch,
+    ('POST', '/api/progress'): App.save_watch,
+    ('POST', '/api/progress/dismiss'): App.dismiss_watch,
     ('GET', '/api/downloads'): App.list_downloads,
     ('POST', '/api/downloads'): App.add_downloads,
     ('POST', '/api/downloads/remove'): App.remove_download,
@@ -972,7 +1255,22 @@ ROUTES = {
     ('GET', '/api/nas'): App.nas_config,
     ('POST', '/api/nas'): App.save_nas,
     ('POST', '/api/nas/test'): App.test_nas,
+    ('GET', '/api/torrents/status'): App.torrent_status,
+    ('GET', '/api/torrents/search'): App.torrent_search,
+    ('GET', '/api/torrents'): App.torrent_list,
+    ('GET', '/api/torrents/item'): App.torrent_item,
+    ('POST', '/api/torrents/inspect'): App.torrent_inspect,
+    ('POST', '/api/torrents/download'): App.torrent_download,
+    ('POST', '/api/torrents/discard'): App.torrent_discard,
+    ('POST', '/api/torrents/pause'): App.torrent_pause,
+    ('POST', '/api/torrents/upload'): App.torrent_upload,
+    ('POST', '/api/torrents/open'): App.torrent_open,
+    ('GET', '/api/torrents/config'): App.torrent_config,
+    ('POST', '/api/torrents/config'): App.save_torrent_config,
+    ('POST', '/api/torrents/config/test'): App.test_torrent_config,
     ('POST', '/api/open'): App.open_folder,
+    ('GET', '/api/videos'): App.videos_config,
+    ('POST', '/api/videos'): App.save_videos,
     ('POST', '/api/close'): App.close,
 }
 
@@ -1030,21 +1328,16 @@ class Handler(BaseHTTPRequestHandler):
         except ApiError as e:
             self.send_json({'error': str(e)}, e.status)
 
-        except DownloadError as e:
-            self.send_json({'error': str(e)}, 502)
+        except AppError as e:
+            self.send_json({'error': describe(e)}, 502)
 
         # Download functions of the cli call sys.exit when something goes wrong
         except (Exception, SystemExit) as e:
             console.log(f"[red]GUI error on {url.path}: {e!r}")
             log_error(f"GUI error on {url.path}", e if isinstance(e, Exception) else None)
 
-            if is_network_error(e):
-                message = "Connessione a internet assente o instabile, riprova tra poco"
-            elif is_disk_full(e):
-                message = "Spazio su disco esaurito"
-            else:
-                message = "Il sito non ha risposto come previsto, riprova tra poco"
-
+            # Which site did not answer and why, never a generic message
+            message = describe(e) if isinstance(e, Exception) else "Il sito non ha risposto come previsto, riprova tra poco"
             self.send_json({'error': message}, 502)
 
     def check_remote(self, method, url):
@@ -1087,11 +1380,21 @@ class Handler(BaseHTTPRequestHandler):
             self.send_body(file.read(), CONTENT_TYPES[extension])
 
     def send_stream(self, path):
-        match = re.fullmatch(r'/api/stream/([0-9a-f]{16})/(?:(master|video|audio)\.m3u8|(video|audio)/(\d+)\.ts)', path)
+        match = re.fullmatch(r'/api/stream/([0-9a-f]{16})/(?:(master|video|audio)\.m3u8|(video|audio)/(\d+)\.ts|subtitles/(\d+)\.vtt)', path)
         stream = self.server.app.streams.get(match.group(1)) if match else None
 
         if stream is None:
             return self.send_json({'error': "Video non trovato, riaprilo"}, 404)
+
+        if match.group(5):
+            try:
+                text = stream.subtitle(int(match.group(5)))
+            except (AppError, requests.RequestException) as e:
+                return self.send_json({'error': describe(e)}, 502)
+
+            if text is None:
+                return self.send_json({'error': "Sottotitoli non trovati"}, 404)
+            return self.send_body(text.encode('utf-8'), 'text/vtt; charset=utf-8')
 
         if match.group(2):
             text = stream.master() if match.group(2) == 'master' else stream.playlist(match.group(2))
@@ -1217,3 +1520,4 @@ def main():
         server.server_close()
         server.app.stop_remote()
         server.app.downloads.stop()
+        server.app.torrents.stop()

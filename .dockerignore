@@ -17,9 +17,12 @@ logs/
 data.json
 nas.json
 nas_known_hosts
+nas_password
 history.json
+progress.json
 downloads.json
 remote.json
+videos.json
 sc_downloader.lock
 sc_downloader.instance.json
 *.bak
@@ -30,3 +33,6 @@ debug.log
 SC Downloader.bat
 VibraVid-*/
 README.md
+
+# Password del NAS per docker compose
+.env

@@ -2,6 +2,7 @@
 
 # Class import
 from Src.Util.headers import get_headers
+from Src.Api.vixcloud import read_subtitle
 
 # General import
 import collections, math, secrets, threading, time
@@ -31,6 +32,8 @@ class Stream:
         self.bandwidth = stream['bandwidth']
         self.codecs = stream['codecs']
         self.language = stream['language']
+        self.subtitles = stream['subtitles']
+        self.subtitle_texts = {}
 
         self.tracks = {'video': self.load(stream['video'])}
         if stream['audio']:
@@ -116,6 +119,18 @@ class Stream:
             time.sleep(1 + attempt)
 
         raise ConnectionError("Segmento del video non disponibile")
+
+    # [ subtitles ]
+    def subtitle(self, index):
+        """Text of a subtitle track, read from the site only when the player asks for it"""
+
+        if not 0 <= index < len(self.subtitles):
+            return None
+
+        if index not in self.subtitle_texts:
+            self.subtitle_texts[index] = read_subtitle(self.subtitles[index]['url'])
+
+        return self.subtitle_texts[index]
 
 
 def get_iv(playlist, index):

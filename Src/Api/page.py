@@ -3,23 +3,52 @@
 # Class import
 from Src.Util.headers import get_headers
 from Src.Util.console import console
+from Src.Util.errors import SiteError, describe, redirected_to
 
 # General import
-import requests, sys, json
+import requests, sys, json, re
 from bs4 import BeautifulSoup
 
-SITE_NAME = "streamingcommunityz"
+SITE_NAME = "streamingcommunityz"      # Used when only the extension is given
+
+def get_host(domain):
+    """
+    Full address of the site, from what the user writes: a whole domain (streamingcommunityz.shiksha, a new name),
+    a pasted link, or only the extension (shiksha) as the old versions saved it
+    """
+
+    host = re.sub(r'^[a-z][a-z0-9+.-]*://', '', (domain or '').strip().lower())
+    host = re.split(r'[/?#]', host)[0].strip('.')
+    host = host[4:] if host.startswith('www.') else host
+
+    return host if '.' in host or not host else f"{SITE_NAME}.{host}"
 
 def get_site_url(domain):
-    return f"https://{SITE_NAME}.{domain}"
+    return f"https://{get_host(domain)}"
 
 def get_base_url(domain):
     return f"{get_site_url(domain)}/it"
 
 def get_version(domain):
+    """Inertia version of the site, the errors say why the domain does not work"""
+
+    site = get_host(domain)
     site_request = requests.get(get_site_url(domain), headers={'user-agent': get_headers()}, timeout=15)
-    soup = BeautifulSoup(site_request.text, "lxml")
-    return json.loads(soup.find("div", {"id": "app"}).get("data-page"))['version']
+    site_request.raise_for_status()
+
+    app = BeautifulSoup(site_request.text, "lxml").find("div", {"id": "app"})
+
+    if app is None or not app.get("data-page"):
+        # A domain that is no more of the site often sends to another one
+        moved = redirected_to(site_request)
+        if moved:
+            raise SiteError(f"{site} rimanda a {moved}, che non è il sito: l'indirizzo è cambiato o il provider blocca il sito")
+        raise SiteError(f"{site} risponde, ma non con la pagina del sito: l'indirizzo potrebbe essere cambiato o il provider blocca il sito")
+
+    try:
+        return json.loads(app.get("data-page"))['version']
+    except (ValueError, KeyError, TypeError):
+        raise SiteError(f"La pagina di {site} è cambiata: il programma non trova la versione del sito")
 
 def get_page_props(url, version, params=None, headers=None):
     """Make inertia req to a page of the site and return its props, raise if it fails"""
@@ -54,7 +83,7 @@ def domain_version():
 
     while True:
         if not domain:
-            domain = input(f"Insert domain ({SITE_NAME}.?): ")
+            domain = get_host(input(f"Insert domain (es. {SITE_NAME}.shiksha): "))
             req_repo['domain'] = domain
             with open('data.json', 'w') as file:
                 json.dump(req_repo, file)
@@ -65,7 +94,7 @@ def domain_version():
             return domain, version
         
         except Exception as e:
-            console.log("[red]Cant get version, problem with domain. Try again.")
+            console.log(f"[red]{describe(e)}")
             domain = None
             continue
 

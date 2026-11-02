@@ -15,7 +15,8 @@ import keyring, paramiko
 CONFIG_FILE = "nas.json"
 KNOWN_HOSTS_FILE = "nas_known_hosts"
 KEYRING_SERVICE = "SC Downloader NAS"
-PASSWORD_ENV = "SC_NAS_PASSWORD"        # Used by the docker image, where there is no credential manager
+PASSWORD_ENV = "SC_NAS_PASSWORD"        # Optional in the docker image, it wins over the password of the settings
+PASSWORD_FILE = "nas_password"          # Used where there is no credential manager (docker), only readable by the program
 DEFAULT_CONFIG = {
     'enabled': False,
     'host': '',
@@ -66,7 +67,7 @@ def get_account(config):
     return f"{config['user']}@{config['host']}"
 
 def get_password(config):
-    """Password from the credential manager of the system, or from the environment (docker)"""
+    """Password from the environment, the credential manager of the system or the file used in docker"""
 
     from_env = os.environ.get(PASSWORD_ENV)
     if from_env:
@@ -76,12 +77,17 @@ def get_password(config):
         return None
 
     try:
-        return keyring.get_password(KEYRING_SERVICE, get_account(config))
+        password = keyring.get_password(KEYRING_SERVICE, get_account(config))
+        if password:
+            return password
     except Exception:
-        return None
+        pass
+
+    saved = storage.read_json(PASSWORD_FILE, {})
+    return saved.get(get_account(config)) if isinstance(saved, dict) else None
 
 def save_password(config, password):
-    """False when the system has no credential manager (docker), there the password comes from the environment"""
+    """In the credential manager of the system, or in a file of the program where there is none (docker)"""
 
     if not password:
         return True
@@ -89,15 +95,35 @@ def save_password(config, password):
     try:
         keyring.set_password(KEYRING_SERVICE, get_account(config), password)
         return True
-    except Exception as e:
+    except Exception:
+        pass
+
+    try:
+        storage.write_json(PASSWORD_FILE, {get_account(config): password})
+    except OSError as e:
         console.log(f"[yellow]NAS: password non salvata ({e})")
         return False
+
+    # The copy kept by storage has the previous password
+    for path in (PASSWORD_FILE, f"{PASSWORD_FILE}.bak"):
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+
+    return True
 
 def delete_password(config):
     try:
         keyring.delete_password(KEYRING_SERVICE, get_account(config))
     except Exception:
         pass
+
+    for path in (PASSWORD_FILE, f"{PASSWORD_FILE}.bak"):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 
 # [ name of the files ]
@@ -135,11 +161,11 @@ def get_file_name(media):
     year = str(media.get('year') or '')
     return f"{title} ({year})" if year else title
 
-def get_remote_path(config, media):
+def get_remote_path(config, media, extension=".mp4"):
     """Path of the file on the nas, with the folders used by media servers"""
 
     folder = get_title_folder(media) or 'Senza nome'
-    file_name = f"{get_file_name(media)}.mp4"
+    file_name = f"{get_file_name(media)}{extension}"
 
     if media.get('type') == 'anime':
         base = config.get('anime_path') or config['tv_path'] or config['film_path']
@@ -194,9 +220,19 @@ def open_sftp(config, password=None):
 
     # Fast check, a nas that is off must not hold the download for long
     try:
-        socket.create_connection((config['host'], config['port']), timeout=4).close()
+        check = socket.create_connection((config['host'], config['port']), timeout=4)
     except OSError:
         raise NasError(f"NAS non raggiungibile su {config['host']}:{config['port']}")
+
+    with check:
+        try:
+            banner = check.recv(64)
+        except OSError:
+            banner = b''
+
+    # The ftp of the nas answers on its own port (21), the upload uses sftp, the one of ssh
+    if banner.startswith(b'220'):
+        raise NasError(f"Sulla porta {config['port']} risponde l'FTP, ma il caricamento usa SFTP: metti la porta 22 e attiva SSH sul NAS")
 
     client = paramiko.SSHClient()
 

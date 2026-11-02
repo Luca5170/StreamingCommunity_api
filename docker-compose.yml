@@ -9,17 +9,30 @@ services:
       # The app, open it from the pc or from the phone: http://<indirizzo del pc>:8770
       - "8770:8770"
 
-    # Molti provider italiani bloccano il sito nei loro DNS: il container ne usa di pubblici
+    # Molti provider italiani bloccano il sito nei loro DNS: il container ne usa di pubblici.
+    # Non 1.1.1.1: da questa rete non risponde e ogni nome si risolveva solo dopo 4 secondi
     dns:
-      - 1.1.1.1
       - 8.8.8.8
+      - 8.8.4.4
 
     volumes:
       # Videos, download da riprendere, impostazioni e cronologia: tutto qui, resta anche se ricrei il container
       - ./data:/data
 
-      # Per salvare i film direttamente in una cartella del pc, togli il commento e cambia il percorso
+      # Per salvare i video direttamente in una cartella del pc, togli il commento e cambia il percorso.
+      # Con un altro nome (- E:/Film:/data/film) la scegli dalle impostazioni, scheda Download, scrivendo /data/film
       # - D:/Film:/data/videos
+
+      # Plugin di ricerca di qBittorrent (e chiave di Jackett) del pc, in sola lettura: la sezione Torrent cerca con quelli
+      - ${LOCALAPPDATA:-./missing}/qBittorrent/nova3:/data/nova3:ro
+
+      # Torrent scaricati da qBittorrent per l'app, in sola lettura: scheda tecnica e caricamento sul NAS
+      # (nelle impostazioni Torrent, Avanzate: in qBittorrent C:/Users/FIB3R/Downloads/SC Downloader, in questa app /data/qbittorrent)
+      - "${USERPROFILE:-./missing}/Downloads/SC Downloader:/data/qbittorrent:ro"
+
+    # Il pc visto dal container (Jackett, Web UI di qBittorrent): i DNS pubblici qui sotto non conoscono questo nome
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
     environment:
       - TZ=Europe/Rome
@@ -27,5 +40,6 @@ services:
       # Indirizzo mostrato nel QR code delle impostazioni (dentro il container non si vede quello vero)
       - SC_ADDRESS=http://192.168.1.23:8770
 
-      # Password del NAS: nel container non c'è la gestione credenziali di Windows
-      # - SC_NAS_PASSWORD=la-tua-password
+      # Password del NAS: basta inserirla nelle impostazioni, viene salvata in data/nas_password.
+      # In alternativa va nel file .env accanto a questo (SC_NAS_PASSWORD=la-tua-password), che non finisce su git
+      - SC_NAS_PASSWORD=${SC_NAS_PASSWORD:-}

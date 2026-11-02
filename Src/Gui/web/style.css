@@ -1169,6 +1169,155 @@ a {
   white-space: nowrap;
 }
 
+/* ---------- Where the videos have been stopped ---------- */
+
+.watch-bar {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 2;
+  display: block;
+  height: 4px;
+  background: rgba(8, 9, 13, 0.6);
+}
+
+.watch-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--gradient);
+}
+
+.card-wrap {
+  position: relative;
+}
+
+.card-dismiss {
+  position: absolute;
+  top: 9px;
+  right: 9px;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(8, 9, 13, 0.75);
+  backdrop-filter: blur(8px);
+  color: var(--text);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.2s, background-color 0.2s;
+}
+
+.card-dismiss svg {
+  width: 14px;
+  height: 14px;
+}
+
+.card-dismiss:hover {
+  background: rgba(255, 95, 109, 0.85);
+}
+
+.card-wrap:hover .card-dismiss,
+.card-dismiss:focus-visible {
+  opacity: 1;
+}
+
+/* On the phone there is no hover, the button is always there */
+@media (hover: none) {
+  .card-dismiss {
+    opacity: 1;
+  }
+}
+
+.episode-progress {
+  display: contents;
+}
+
+.episode-thumb .watch-bar {
+  right: 6px;
+  bottom: 5px;
+  left: 6px;
+  height: 3px;
+  overflow: hidden;
+  border-radius: 3px;
+}
+
+.episodes.compact .episode .watch-bar {
+  right: 14px;
+  bottom: 6px;
+  left: 14px;
+  height: 3px;
+  overflow: hidden;
+  border-radius: 3px;
+}
+
+.episode-watch {
+  display: block;
+  margin-top: 4px;
+  color: var(--accent);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.episode-watch.seen {
+  color: var(--success);
+}
+
+.episode-watch:empty {
+  display: none;
+}
+
+.movie-watch {
+  max-width: 440px;
+  margin-top: 14px;
+}
+
+.movie-watch:empty {
+  display: none;
+}
+
+.movie-watch .watch-bar {
+  position: relative;
+  overflow: hidden;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.movie-watch p {
+  margin: 7px 0 0;
+  color: var(--dim);
+  font-size: 13px;
+}
+
+.movie-watch p.seen {
+  color: var(--success);
+  font-weight: 600;
+}
+
+.player-resume {
+  position: absolute;
+  bottom: 72px;
+  left: 18px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 8px 8px 16px;
+  border-radius: 14px;
+  background: rgba(18, 20, 27, 0.92);
+  box-shadow: 0 16px 40px -16px rgba(0, 0, 0, 0.9);
+  font-weight: 600;
+  transition: opacity 0.5s var(--ease);
+}
+
+.player-resume.leaving {
+  opacity: 0;
+}
+
 .row-sub {
   margin: 4px 0 0;
   color: var(--dim);
@@ -2156,6 +2305,13 @@ a {
   color: var(--danger);
 }
 
+/* The reason of an error is read in full, also on the phone where there is no tooltip */
+.job.error .job-state,
+.job.waiting .job-state {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
 .job-actions {
   display: flex;
   flex-direction: column;
@@ -2288,11 +2444,16 @@ a {
   animation: spin 0.8s linear infinite;
 }
 
+/* The right side stays free for the close button, on a narrow phone the tabs go on two rows */
 .settings-tabs {
   display: flex;
-  justify-content: center;
-  gap: 8px;
-  padding: 20px 20px 0;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 20px 64px 0 20px;
+}
+
+.settings-tabs .tab {
+  padding: 0 11px;
 }
 
 .settings-body {
@@ -2522,18 +2683,11 @@ a {
   box-shadow: 0 0 0 4px rgba(255, 181, 71, 0.13);
 }
 
-.domain-prefix {
-  padding-left: 16px;
-  color: var(--dim);
-  font-weight: 600;
-  white-space: nowrap;
-}
-
 .domain-field input {
   flex: 1;
   min-width: 0;
   height: 100%;
-  padding: 0 16px 0 1px;
+  padding: 0 16px;
   border: 0;
   outline: none;
   background: none;
@@ -2571,6 +2725,774 @@ a {
   flex-shrink: 0;
   width: 18px;
   height: 18px;
+}
+
+/* ---------- Torrents ---------- */
+
+.torrent-button[aria-pressed="true"] {
+  border-color: rgba(255, 181, 71, 0.35);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.torrent-view {
+  min-height: 100vh;
+  padding: calc(var(--topbar) + 40px) var(--gutter) 80px;
+}
+
+.torrent-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.torrent-query {
+  position: relative;
+  display: flex;
+  flex: 1 1 340px;
+  min-width: 0;
+}
+
+.torrent-query .search-icon {
+  left: 16px;
+}
+
+.torrent-query input {
+  width: 100%;
+  height: 50px;
+  padding: 0 16px 0 46px;
+  border: 1px solid var(--line-strong);
+  border-radius: 14px;
+  outline: none;
+  background: rgba(255, 255, 255, 0.05);
+  font-size: 16px;
+  transition: border-color 0.2s, box-shadow 0.25s, background-color 0.2s;
+}
+
+.torrent-query input::placeholder {
+  color: var(--dim);
+}
+
+.torrent-query input:focus {
+  border-color: rgba(255, 181, 71, 0.6);
+  background: rgba(255, 255, 255, 0.07);
+  box-shadow: 0 0 0 4px rgba(255, 181, 71, 0.13);
+}
+
+.torrent-cats {
+  flex: 0 0 auto;
+}
+
+.torrent-form .button {
+  height: 50px;
+}
+
+#torrent-setup .notice {
+  margin: 0 0 18px;
+}
+
+.notice .button {
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.notice.bad {
+  border-color: rgba(255, 95, 109, 0.3);
+  background: rgba(255, 95, 109, 0.1);
+  color: #ffc6cb;
+}
+
+.tab.small {
+  height: 32px;
+  padding: 0 13px;
+  font-size: 13px;
+}
+
+.tab[aria-pressed="true"] {
+  border-color: transparent;
+  background: var(--text);
+  color: var(--bg);
+}
+
+.torrent-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  align-items: start;
+  gap: 28px;
+}
+
+/* Results */
+
+.torrent-toolbar {
+  position: sticky;
+  top: var(--topbar);
+  z-index: 4;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 12px;
+  margin: 0 -12px 12px;
+  padding: 10px 12px;
+  border-radius: 16px;
+  background: rgba(8, 9, 13, 0.88);
+  backdrop-filter: blur(14px);
+}
+
+.torrent-toolbar .tabs {
+  flex: 0 0 auto;
+  padding: 0;
+}
+
+.torrent-filter {
+  flex: 1 1 180px;
+  min-width: 0;
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  outline: none;
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 14px;
+}
+
+.torrent-filter:focus {
+  border-color: rgba(255, 181, 71, 0.6);
+}
+
+.torrent-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--dim);
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+.torrent-sort select {
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  outline: none;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 13.5px;
+  cursor: pointer;
+}
+
+.torrent-toolbar .toolbar-count {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.torrent-list {
+  display: grid;
+  gap: 8px;
+}
+
+.torrent-wait {
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  padding: 70px 20px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.torrent-wait strong {
+  color: var(--text);
+  font-size: 17px;
+}
+
+.torrent-failed {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 4px;
+  color: var(--dim);
+  font-size: 13px;
+}
+
+.torrent-failed svg {
+  flex-shrink: 0;
+  width: 15px;
+  height: 15px;
+}
+
+.torrent-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 56px auto;
+  align-items: center;
+  gap: 14px;
+  padding: 6px 12px 6px 6px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.025);
+  animation: rise 0.4s var(--ease) both;
+  animation-delay: calc(var(--i) * 18ms);
+  transition: border-color 0.2s, background-color 0.2s;
+}
+
+.torrent-row:hover {
+  border-color: var(--line-strong);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.torrent-row.dead {
+  opacity: 0.6;
+}
+
+.torrent-row-main {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 8px;
+  border: 0;
+  border-radius: 12px;
+  background: none;
+  text-align: left;
+}
+
+.torrent-title {
+  font-size: 14.5px;
+  font-weight: 650;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.torrent-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  height: 21px;
+  padding: 0 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+.tag.quality {
+  border-color: rgba(255, 181, 71, 0.4);
+  color: var(--gold);
+}
+
+.tag.hdr {
+  border-color: rgba(167, 139, 250, 0.45);
+  color: #cdbcff;
+}
+
+.tag.good {
+  border-color: rgba(61, 220, 151, 0.4);
+  color: var(--success);
+}
+
+.tag.bad {
+  border-color: rgba(255, 95, 109, 0.45);
+  color: var(--danger);
+}
+
+.torrent-meta {
+  color: var(--dim);
+  font-size: 12.5px;
+}
+
+.tag.warn {
+  border-color: rgba(255, 181, 71, 0.45);
+  color: var(--accent);
+}
+
+.torrent-reasons {
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.torrent-reasons.fake {
+  color: #ff9aa3;
+}
+
+.torrent-reasons.suspect {
+  color: #ffd9a0;
+}
+
+.torrent-row.fake {
+  border-color: rgba(255, 95, 109, 0.3);
+  background: rgba(255, 95, 109, 0.05);
+}
+
+.torrent-notes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+}
+
+.torrent-notes .link-button {
+  margin: 0;
+  font-size: inherit;
+}
+
+.button.ghost.danger {
+  border-color: rgba(255, 95, 109, 0.4);
+  color: var(--danger);
+}
+
+.notice.good {
+  border-color: rgba(61, 220, 151, 0.28);
+  background: rgba(61, 220, 151, 0.1);
+  color: #bdf2da;
+}
+
+.ts-check {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.ts-check .notice {
+  margin: 0;
+}
+
+.torrent-health {
+  display: grid;
+  justify-items: center;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+}
+
+.torrent-health strong {
+  font-size: 17px;
+}
+
+.torrent-health span {
+  color: var(--dim);
+  font-size: 11px;
+}
+
+.torrent-health.good strong {
+  color: var(--success);
+}
+
+.torrent-health.low strong {
+  color: var(--accent);
+}
+
+.torrent-health.none strong {
+  color: var(--danger);
+}
+
+.torrent-row-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* Your torrents */
+
+.torrent-side {
+  position: sticky;
+  top: calc(var(--topbar) + 16px);
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - var(--topbar) - 40px);
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+}
+
+.torrent-side-head {
+  padding: 18px 20px 4px;
+}
+
+.torrent-side-head h2 {
+  margin: 0;
+  font: 700 18px/1.2 var(--font-display);
+}
+
+.torrent-jobs {
+  padding: 12px 12px 16px;
+}
+
+.torrent-jobs .empty {
+  padding: 36px 12px;
+}
+
+/* The column is narrow: state and speed on two lines, the state is never cut away */
+.torrent-job .job-status {
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* Sheet of a torrent */
+
+.sheet-torrent {
+  width: min(720px, 100%);
+}
+
+.torrent-sheet-body {
+  padding: 30px 32px 0;
+}
+
+.ts-head {
+  padding-right: 48px;
+}
+
+.ts-head .eyebrow {
+  margin-bottom: 10px;
+}
+
+.ts-title {
+  margin: 0 0 12px;
+  font: 700 21px/1.35 var(--font-display);
+  overflow-wrap: anywhere;
+}
+
+.ts-head .meta {
+  margin-bottom: 12px;
+}
+
+.ts-head .link-button {
+  margin-top: 12px;
+}
+
+.ts-section {
+  margin-top: 26px;
+  padding-top: 22px;
+  border-top: 1px solid var(--line);
+}
+
+.ts-section-title {
+  margin: 0 0 14px;
+  font: 700 17px/1.2 var(--font-display);
+}
+
+.ts-section .fields {
+  gap: 14px;
+}
+
+.ts-kind-row {
+  align-items: end;
+}
+
+.ts-kinds {
+  padding: 0;
+}
+
+.field input[type="number"] {
+  padding-right: 8px;
+}
+
+.ts-text {
+  margin: 0 0 14px;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.ts-single code {
+  color: var(--text);
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+
+.ts-wait {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  color: var(--muted);
+  font-size: 13.5px;
+}
+
+.ts-wait .spinner {
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+}
+
+.ts-wait strong {
+  display: block;
+  color: var(--text);
+  font-size: 15px;
+}
+
+.ts-section .notice {
+  margin: 0 0 12px;
+}
+
+.ts-retry {
+  margin-top: 14px;
+}
+
+.specs {
+  display: grid;
+  gap: 14px;
+  margin: 0 0 18px;
+}
+
+.specs > div {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 12px;
+}
+
+.specs dt {
+  padding-top: 2px;
+  color: var(--dim);
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.specs dd {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.tracks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.track {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  font-size: 13px;
+}
+
+.track span {
+  color: var(--dim);
+}
+
+.track.ita {
+  border-color: rgba(61, 220, 151, 0.35);
+  background: rgba(61, 220, 151, 0.08);
+}
+
+.track.ita strong {
+  color: var(--success);
+}
+
+.ts-files-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.ts-files-head h4 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.ts-files-head .toolbar-count {
+  flex: 0 1 auto;
+}
+
+.ts-file-list {
+  display: grid;
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.ts-file {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.ts-file:last-child {
+  border-bottom: 0;
+}
+
+.ts-file:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.ts-file input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.ts-file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ts-file-size {
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.ts-file.dangerous .ts-file-name {
+  color: var(--danger);
+}
+
+.ts-actions {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin: 26px -32px 0;
+  padding: 16px 32px;
+  border-top: 1px solid var(--line);
+  background: rgba(18, 20, 27, 0.94);
+  backdrop-filter: blur(14px);
+}
+
+/* Settings */
+
+.fields-title {
+  margin: 8px 0 -2px;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.fields-title:first-child {
+  margin-top: 0;
+}
+
+.fields .switch {
+  margin: 4px 0 0;
+}
+
+.fields-note {
+  margin: -4px 0 0;
+}
+
+.ts-field-gap {
+  margin-top: 12px;
+}
+
+.advanced summary {
+  color: var(--muted);
+  font-size: 13.5px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.advanced[open] summary {
+  margin-bottom: 4px;
+}
+
+.advanced .form-note {
+  margin: 4px 0 12px;
+}
+
+@media (max-width: 1100px) {
+  .torrent-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .torrent-side {
+    position: static;
+    max-height: none;
+  }
+
+  /* On narrow screens your torrents come first while they move, after the results otherwise */
+  .torrent-side.active {
+    order: -1;
+  }
+
+  .torrent-jobs {
+    max-height: 360px;
+  }
+}
+
+@media (max-width: 640px) {
+  .torrent-view {
+    padding-top: calc(var(--topbar) + 24px);
+  }
+
+  .torrent-form .button {
+    flex: 1;
+    order: 3;
+  }
+
+  .torrent-cats {
+    flex-basis: 100%;
+    order: 2;
+  }
+
+  .torrent-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 4px 10px;
+    padding: 4px 10px 10px 4px;
+  }
+
+  .torrent-health {
+    grid-row: 1;
+    grid-column: 2;
+    align-self: start;
+    padding-top: 10px;
+  }
+
+  .torrent-row-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-end;
+  }
+
+  .hide-small {
+    display: none;
+  }
+
+  .torrent-row-actions .button {
+    width: 44px;
+    padding: 0;
+  }
+
+  .torrent-sheet-body {
+    padding: 64px 20px 0;
+  }
+
+  .ts-head {
+    padding-right: 0;
+  }
+
+  .ts-actions {
+    margin-inline: -20px;
+    padding: 14px 20px calc(14px + env(safe-area-inset-bottom));
+  }
+
+  .ts-actions .button {
+    flex: 1;
+  }
+
+  .specs > div {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+  }
 }
 
 /* ---------- Toasts ---------- */
@@ -2848,5 +3770,25 @@ a {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+}
+
+/* Phones: one more button in the top bar, everything a bit closer */
+@media (max-width: 420px) {
+  .topbar {
+    gap: 8px;
+  }
+
+  .topbar-actions {
+    gap: 2px;
+  }
+
+  .topbar-actions .icon-button {
+    width: 38px;
+    height: 38px;
+  }
+
+  .category {
+    padding: 0 9px;
   }
 }

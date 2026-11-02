@@ -4,14 +4,14 @@
 from Src.Util.console import console
 from Src.Util.headers import get_headers
 from Src.Util.cancel import DownloadCancelled
-from Src.Util.errors import DownloadError, DiskFullError, is_disk_full, is_network_error, is_online, wait_online
-from Src.Util import http, storage
+from Src.Util.errors import DownloadError, DiskFullError, is_disk_full, is_network_error, is_online, wait_online, describe_response, step
+from Src.Util import http, storage, videos
 from Src.Lib.FFmpeg.util import print_duration_table
 
 # Import
 from m3u8 import M3U8 as M3U8_Lib
 from tqdm.rich import tqdm
-import requests, os, ffmpeg, sys, warnings, shutil, time, threading, random, hashlib, subprocess
+import requests, os, ffmpeg, sys, warnings, shutil, time, threading, random, hashlib, subprocess, errno
 from collections import Counter
 from urllib.parse import urlparse, parse_qsl, urlencode
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
@@ -30,7 +30,7 @@ RETRY_WORKER = 2        # Used for the segments that failed the first time
 BUSY_CODES = (429, 500, 502, 503, 504)
 MIN_FREE_SPACE = 2 * 1024 ** 3          # Needed to start a download
 MIN_FREE_SPACE_JOIN = 200 * 1024 ** 2   # Below this a failed join is a full disk
-DONWLOAD_SUB = True
+COPY_CHUNK = 8 * 1024 * 1024            # Pieces of a video copied to another disk
 DOWNLOAD_DEFAULT_LANGUAGE = False
 
 
@@ -118,31 +118,6 @@ class M3U8_Parser:
         else:
             print("No video playlist find")
             return None
-        
-    def download_subtitle(self):
-        """Download all subtitle if present"""
-
-        path = os.path.join("videos", "subtitle")
-
-        if self.subtitle_playlist:
-            for sub_info in self.subtitle_playlist:
-                name_language = sub_info.get("language")
-
-                if name_language in ["auto", "ita"]:
-                    continue
-
-                os.makedirs(path, exist_ok=True)
-                console.log(f"[green]Download subtitle: [red]{name_language}")
-                req_sub_content = http.get(sub_info.get("uri"))
-
-                sub_parse = M3U8_Parser()
-                sub_parse.parse_data(req_sub_content.text)
-                url_subititle = sub_parse.subtitle[0]
-
-                open(os.path.join(path, name_language + ".vtt"), "wb").write(http.get(url_subititle).content)
-
-        else:
-            console.log("[red]No subtitle find")
 
     def get_track_audio(self, language_name):   # Ex. English
         """Return url of audio eng audio playlist if present"""
@@ -225,6 +200,10 @@ class M3U8_Segments:
         self.offline_lock = threading.Lock()
         self.offline_waiters = 0
 
+        # Bytes arrived from the network, the gui shows the speed of the download with them
+        self.received = 0
+        self.received_lock = threading.Lock()
+
         # One user agent and one pool of connections for the whole download
         self.user_agent = get_headers()
         self.session = requests.Session()
@@ -249,7 +228,7 @@ class M3U8_Segments:
         response = http.get(self.url, session=self.session, headers={'user-agent': self.user_agent}, wait=True, check=check)
 
         if not response.ok:
-            raise DownloadError(f"Il server del video ha risposto con errore {response.status_code}")
+            raise DownloadError(describe_response(response, "Il server del video"))
 
         self.parse_data(response.text)
 
@@ -290,7 +269,7 @@ class M3U8_Segments:
 
         # The callback of the gui raises DownloadCancelled when the user cancels
         if self.progress_callback != None:
-            self.progress_callback(progress_counter.n, len(self.segments))
+            self.progress_callback(progress_counter.n, len(self.segments), self.received)
 
     def wait(self, seconds, check):
         """Sleep before a new attempt, but stop at once if the download is cancelled"""
@@ -337,10 +316,10 @@ class M3U8_Segments:
 
             try:
                 with self.throttle:
-                    response = self.session.get(ts_url, headers={'user-agent': self.user_agent}, timeout=20)
+                    with self.session.get(ts_url, headers={'user-agent': self.user_agent}, timeout=20, stream=True) as response:
+                        content = self.read_body(response) if response.status_code == 200 else None
 
                 if response.status_code == 200:
-                    content = response.content
                     expected = response.headers.get('content-length')
 
                     # A connection closed in the middle gives a shorter segment
@@ -374,6 +353,18 @@ class M3U8_Segments:
 
         self.failure_reasons.append(reason)
         return None
+
+    def read_body(self, response):
+        """Segment read in pieces, the bytes are counted while they arrive and not only at the end"""
+
+        chunks = []
+
+        for chunk in response.iter_content(64 * 1024):
+            chunks.append(chunk)
+            with self.received_lock:
+                self.received += len(chunk)
+
+        return b"".join(chunks)
 
     def save_ts(self, index, progress_counter):
         """Save ts file and decrypt if there is iv present in decryption class"""
@@ -553,28 +544,32 @@ class M3U8_Segments:
         self.clean()
 
 class M3U8_Downloader:
-    def __init__(self, m3u8_url, m3u8_audio = None, key=None, output_filename="output.mp4", progress_callback=None):
+    def __init__(self, m3u8_url, m3u8_audio = None, key=None, output_filename="output.mp4", progress_callback=None, subtitles=None):
         self.m3u8_url = m3u8_url
         self.m3u8_audio = m3u8_audio
         self.key = key
         self.video_path = output_filename
         self.progress_callback = progress_callback
+        self.subtitles = subtitles or []
 
-        # The file is built in tmp and reaches its folder only when it is complete
-        self.name = hashlib.md5(os.path.abspath(output_filename).encode()).hexdigest()[:10]
+        # The file is built in tmp and reaches its folder only when it is complete.
+        # The name does not change with the folder of the videos, the segments saved before are used again
+        self.name = hashlib.md5(os.path.abspath(videos.stable_path(output_filename)).encode()).hexdigest()[:10]
         self.work_folder = os.path.join("tmp", "output", self.name)
         self.temp_video = os.path.join(self.work_folder, "video.mp4")
         self.temp_audio = os.path.join(self.work_folder, "audio.mp4")
         self.temp_merged = os.path.join(self.work_folder, "merged.mp4")
+        self.temp_subtitled = os.path.join(self.work_folder, "subtitled.mp4")
 
-    def update_progress(self, stage, done=0, total=0):
+    def update_progress(self, stage, done=0, total=0, received=None):
         """
-        Notify progress of current stage (video, join_video, audio, join_audio, merge).
+        Notify progress of current stage (video, join_video, audio, join_audio, merge, save),
+        with the bytes received in the stage when there are some.
         The callback raises DownloadCancelled to stop the download.
         """
 
         if self.progress_callback != None:
-            self.progress_callback(stage, done, total)
+            self.progress_callback(stage, done, total, received)
 
     def set_offline(self, offline):
         """The gui shows that the download waits for the connection"""
@@ -590,12 +585,17 @@ class M3U8_Downloader:
         # Half files of a join stopped by a power cut
         shutil.rmtree(self.work_folder, ignore_errors=True)
         check_disk(".", MIN_FREE_SPACE)
+
+        # The folder of the videos can be on another disk, better to know it before downloading
+        check_disk(os.path.dirname(os.path.abspath(self.video_path)), MIN_FREE_SPACE)
         os.makedirs(self.work_folder, exist_ok=True)
 
         try:
             result = self.download()
-            os.makedirs(os.path.dirname(os.path.abspath(self.video_path)), exist_ok=True)
-            os.replace(result, self.video_path)
+
+            with step("Salvataggio del file"):
+                os.makedirs(os.path.dirname(os.path.abspath(self.video_path)), exist_ok=True)
+                move_file(result, self.video_path, lambda done, total: self.update_progress("save", done, total, done))
 
         except OSError as e:
             if is_disk_full(e):
@@ -609,31 +609,76 @@ class M3U8_Downloader:
     def download(self):
         """Download video and audio, return the complete file inside the work folder"""
 
-        video_m3u8 = M3U8_Segments(self.m3u8_url, self.key, lambda done, total: self.update_progress("video", done, total),
+        video_m3u8 = M3U8_Segments(self.m3u8_url, self.key, lambda done, total, received: self.update_progress("video", done, total, received),
                                    cache_name=f"{self.name}_video", offline_callback=self.set_offline)
         console.log("[green]Download video ts")
-        video_m3u8.get_info(lambda: self.update_progress("video"))
-        video_m3u8.download_ts()
+        with step("Download del video"):
+            video_m3u8.get_info(lambda: self.update_progress("video"))
+            video_m3u8.download_ts()
         self.update_progress("join_video")
-        video_m3u8.join(self.temp_video, lambda: self.update_progress("join_video"))
+        with step("Unione dei segmenti del video"):
+            video_m3u8.join(self.temp_video, lambda: self.update_progress("join_video"))
         print_duration_table(self.temp_video)
         print("\n")
 
         if self.m3u8_audio == None:
-            return self.temp_video
+            return self.add_subtitles(self.temp_video)
 
-        audio_m3u8 = M3U8_Segments(self.m3u8_audio, self.key, lambda done, total: self.update_progress("audio", done, total),
+        audio_m3u8 = M3U8_Segments(self.m3u8_audio, self.key, lambda done, total, received: self.update_progress("audio", done, total, received),
                                    cache_name=f"{self.name}_audio", offline_callback=self.set_offline)
         console.log("[green]Download audio ts")
-        audio_m3u8.get_info(lambda: self.update_progress("audio"))
-        audio_m3u8.download_ts()
+        with step("Download dell'audio"):
+            audio_m3u8.get_info(lambda: self.update_progress("audio"))
+            audio_m3u8.download_ts()
         self.update_progress("join_audio")
-        audio_m3u8.join(self.temp_audio, lambda: self.update_progress("join_audio"))
+        with step("Unione dei segmenti dell'audio"):
+            audio_m3u8.join(self.temp_audio, lambda: self.update_progress("join_audio"))
         print_duration_table(self.temp_audio)
         print("\n")
 
         self.update_progress("merge")
-        return self.join_audio()
+        with step("Unione di audio e video"):
+            merged = self.join_audio()
+
+        return self.add_subtitles(merged)
+
+    def add_subtitles(self, video_path):
+        """Put the subtitles inside the file, return the file to keep: a problem with them never costs the video"""
+
+        if not self.subtitles:
+            return video_path
+
+        self.update_progress("merge")
+        command = ['ffmpeg', '-y', '-loglevel', 'error', '-i', video_path]
+        options = ['-map', '0', '-c', 'copy', '-c:s', 'mov_text']
+
+        with step("Aggiunta dei sottotitoli"):
+            for index, track in enumerate(self.subtitles):
+                subtitle_path = os.path.join(self.work_folder, f"subtitle_{index}.vtt")
+
+                with open(subtitle_path, 'w', encoding='utf-8', newline='\n') as file:
+                    file.write(track['text'])
+
+                flags = [name for name in ('default', 'forced') if track[name]]
+
+                # The format is told to ffmpeg: this file comes from the site, it must not guess what it is.
+                # In a mp4 the name of a track is its handler, a title would not be saved
+                command += ['-f', 'webvtt', '-i', subtitle_path]
+                options += ['-map', f"{index + 1}:s",
+                            f"-metadata:s:s:{index}", f"language={track['language']}",
+                            f"-metadata:s:s:{index}", f"handler_name={track['title']}",
+                            f"-disposition:s:{index}", '+'.join(flags) or '0']
+
+            try:
+                run_ffmpeg(command + options + [self.temp_subtitled], lambda: self.update_progress("merge"))
+
+            except ffmpeg.Error:
+                check_disk(self.work_folder)
+                console.log("[yellow]Subtitles not added to the video")
+                return video_path
+
+        console.print(f"[green]Subtitles added: {', '.join(track['title'] for track in self.subtitles)}")
+        return self.temp_subtitled
 
     def join_audio(self):
         """Join audio with video and sync it, return the file to keep"""
@@ -662,7 +707,7 @@ class M3U8_Downloader:
             # Audio is kept apart, next to the video
             audio_path = os.path.splitext(self.video_path)[0] + ".audio.mp4"
             os.makedirs(os.path.dirname(os.path.abspath(audio_path)), exist_ok=True)
-            os.replace(self.temp_audio, audio_path)
+            move_file(self.temp_audio, audio_path)
             console.log(f"[red]Error merging audio, audio saved in {audio_path}: {e}")
             return self.temp_video
 
@@ -682,11 +727,46 @@ def check_disk(path, needed=None):
     if free < (MIN_FREE_SPACE_JOIN if needed is None else needed):
         raise DiskFullError(path)
 
-def run_ffmpeg(stream, check=None):
-    """Run ffmpeg and wait for it, ffmpeg is stopped if the download is cancelled meanwhile"""
+def move_file(source, target, progress=None):
+    """Move a file to its folder. On another disk it is copied, there it takes its name only when it is complete"""
 
     try:
-        process = subprocess.Popen(ffmpeg.compile(stream), stdin=subprocess.DEVNULL)
+        os.replace(source, target)
+        return
+
+    except OSError as e:
+        if e.errno != errno.EXDEV:
+            raise
+
+    temp_path = f"{target}.parte"
+    total = os.path.getsize(source)
+    done = 0
+
+    try:
+        with open(source, 'rb') as reader, open(temp_path, 'wb') as writer:
+            while chunk := reader.read(COPY_CHUNK):
+                writer.write(chunk)
+                done += len(chunk)
+
+                if progress != None:
+                    progress(done, total)
+
+        os.replace(temp_path, target)
+
+    except BaseException:
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+        raise
+
+    os.remove(source)
+
+def run_ffmpeg(stream, check=None):
+    """Run ffmpeg and wait for it, ffmpeg is stopped if the download is cancelled meanwhile. Stream can be a ready command"""
+
+    try:
+        process = subprocess.Popen(stream if isinstance(stream, list) else ffmpeg.compile(stream), stdin=subprocess.DEVNULL)
     except FileNotFoundError:
         raise DownloadError("FFmpeg non trovato: installalo e riavvia il programma", retry=False)
 
@@ -710,20 +790,11 @@ def df_make_req(url):
     response = http.get(url)
 
     if not response.ok:
-        raise DownloadError(f"Il server del video ha risposto con errore {response.status_code}")
+        raise DownloadError(describe_response(response, "Il server del video"))
 
     return response.text
 
-def download_subtitle(url, name_language):
-    """Make req to vtt url and save to video subtitle folder"""
-
-    path = os.path.join("videos", "subtitle")
-    os.makedirs(path, exist_ok=True)
-
-    console.log(f"[green]Download subtitle: [red]{name_language}")
-    open(os.path.join(path, name_language + ".vtt"), "wb").write(http.get(url).content)
-
-def download_m3u8(m3u8_playlist=None, m3u8_index = None, m3u8_audio=None, m3u8_subtitle=None, key=None,  output_filename=os.path.join("videos", "output.mp4"), log=False, progress_callback=None):
+def download_m3u8(m3u8_playlist=None, m3u8_index = None, m3u8_audio=None, subtitles=None, key=None,  output_filename=os.path.join(videos.DEFAULT_FOLDER, "output.mp4"), log=False, progress_callback=None):
 
     # Get byte of key
     key = bytes.fromhex(key) if key is not None else key
@@ -756,33 +827,8 @@ def download_m3u8(m3u8_playlist=None, m3u8_index = None, m3u8_audio=None, m3u8_s
                 raise DownloadError("Il player non ha un video valido")
 
 
-        # Download subtitle if present ( normaly in m3u8 playlist )
-        if DONWLOAD_SUB: 
-            parse_class_m3u8.download_subtitle()
-
-    if m3u8_subtitle != None:
-
-        # Subtitles are an extra, the video is downloaded also when they fail
-        try:
-            parse_class_m3u8_sub = M3U8_Parser()
-
-            # Parse directly m3u8 content pass if present
-            if "#EXTM3U" not in m3u8_subtitle:
-                parse_class_m3u8_sub.parse_data(df_make_req(m3u8_subtitle))
-            else:
-                parse_class_m3u8_sub.parse_data(m3u8_subtitle)
-
-            # Download subtitle if present ( normaly in m3u8 playlist )
-            if DONWLOAD_SUB:
-                parse_class_m3u8_sub.download_subtitle()
-
-        except Exception as e:
-            console.log(f"[yellow]Subtitles not downloaded: {e}")
-
-
-    # Download m3u8 index, with segments
-    # os.makedirs("videos", exist_ok=True)
-    path = output_filename.split("\\")
-    os.makedirs("\\".join(path[:-1]), exist_ok=True)
+    # Download m3u8 index, with segments. The separator of the path is not always "\\": on linux (docker) it is "/"
+    with step("Creazione della cartella dei video"):
+        os.makedirs(os.path.dirname(output_filename) or ".", exist_ok=True)
     if log: console.log(f"[green]Dowload m3u8 from index [white]=> [purple]{m3u8_index}")
-    M3U8_Downloader(m3u8_index, m3u8_audio, key=key, output_filename=output_filename, progress_callback=progress_callback).start()
+    M3U8_Downloader(m3u8_index, m3u8_audio, key=key, output_filename=output_filename, progress_callback=progress_callback, subtitles=subtitles).start()

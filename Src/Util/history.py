@@ -35,6 +35,14 @@ def add(title_id, slug, name, kind, year=None, date=None, source='sc'):
 
     add_many([{'id': title_id, 'slug': slug, 'name': name, 'type': kind, 'year': year, 'date': date or time.time(), 'source': source}])
 
+def reset_imported():
+    """Past downloads are looked for again, known titles are skipped"""
+
+    with lock:
+        data = load()
+        data['imported'] = data['imported_anime'] = False
+        save(data)
+
 def add_many(titles, imported=None, flag='imported'):
     with lock:
         data = load()

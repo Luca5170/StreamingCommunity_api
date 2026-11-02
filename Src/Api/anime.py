@@ -3,7 +3,8 @@
 # Class import
 from Src.Util.headers import get_headers
 from Src.Util.console import console
-from Src.Util import http
+from Src.Util import http, videos
+from Src.Util.errors import step
 from Src.Lib.FFmpeg.my_m3u8 import download_m3u8
 from Src.Lib.Nas.nas import finalize
 from Src.Api import film
@@ -152,16 +153,20 @@ def dw_episode(anime_id, slug, episode_id, episode_number, progress_callback=Non
     console.print(f"[green]Download anime: [blue]{slug} [green]=> [purple]episode {episode_number}")
 
     # Same vixcloud player of streamingcommunity
-    embed_content = get_player_script(client.get_embed_url(episode_id))
-    json_win_param = parse_content(embed_content)
+    with step("Ricerca dell'episodio su AnimeUnity"):
+        embed_url = client.get_embed_url(episode_id)
 
-    m3u8_playlist = get_playlist(json_win_param)
-    master_playlist = get_master_playlist(m3u8_playlist)
+    with step("Lettura del player"):
+        embed_content = get_player_script(embed_url)
+        json_win_param = parse_content(embed_content)
 
-    m3u8_url = get_m3u8_url(master_playlist)
-    m3u8_key = get_m3u8_key(m3u8_url)
+        m3u8_playlist = get_playlist(json_win_param)
+        master_playlist = get_master_playlist(m3u8_playlist)
 
-    mp4_path = os.path.join("videos", "anime", slug, f"{slug}_E{episode_number}.mp4")
+        m3u8_url = get_m3u8_url(master_playlist)
+        m3u8_key = get_m3u8_key(m3u8_url)
+
+    mp4_path = os.path.join(videos.get_folder(), "anime", slug, f"{slug}_E{episode_number}.mp4")
     m3u8_url_audio = get_m3u8_audio(master_playlist)
 
     if m3u8_url_audio != None:
@@ -172,4 +177,5 @@ def dw_episode(anime_id, slug, episode_id, episode_number, progress_callback=Non
     download_m3u8(m3u8_index=m3u8_url, m3u8_audio=m3u8_url_audio, key=m3u8_key, output_filename=mp4_path, progress_callback=progress_callback)
 
     # Rename the file and move it to the nas if it is enabled
-    return finalize(mp4_path, media, progress_callback)
+    with step("Salvataggio del file"):
+        return finalize(mp4_path, media, progress_callback)

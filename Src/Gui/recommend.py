@@ -3,7 +3,7 @@
 # Class import
 import Src.Api.page as Page
 from Src.Lib.Nas import nas
-from Src.Util import history
+from Src.Util import history, videos
 from Src.Util.console import console
 
 # General import
@@ -78,8 +78,8 @@ def list_downloads():
         found.append({**parse_name(name), 'type': kind, 'date': date})
 
     # Films are files, series are folders with their episodes
-    if os.path.isdir("videos"):
-        for entry in os.scandir("videos"):
+    if os.path.isdir(videos.get_folder()):
+        for entry in os.scandir(videos.get_folder()):
             add(entry.name, 'tv' if entry.is_dir() else 'movie', entry.is_dir(), entry.stat().st_mtime)
 
     config = nas.load_config()
